@@ -1,0 +1,42 @@
+{
+  "name": "opencode-fff-search",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that replaces default grep/glob with fff.nvim's ultra-fast search",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js"
+  ],
+  "keywords": [
+    "opencode",
+    "plugin",
+    "fff",
+    "search",
+    "file-search",
+    "grep",
+    "glob",
+    "fast",
+    "fuzzy",
+    "frecency"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/opencode-fff-search.git"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.14.0"
+  },
+  "dependencies": {
+    "@ff-labs/fff-node": "^0.6.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": ["darwin", "linux", "win32"],
+  "cpu": ["x64", "arm64"]
+}
