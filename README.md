@@ -106,9 +106,15 @@ opencode debug config --print-logs 2>&1 | grep fff
 
 This plugin overrides OpenCode's built-in `grep` and `glob` tools. When the AI (or user) performs file search, it uses fff's in-memory index instead of spawning ripgrep processes.
 
-- **`grep`** → fff's content search with smart-case, regex, and fuzzy modes
-- **`glob`** → fff's fuzzy file finder with frecency ranking
+- **`grep`** -> fff's content search with smart-case, regex, and fuzzy modes
+- **`glob`** -> fff's fuzzy file finder with frecency ranking
 
+> **Note:** Memory-mapped file caching (mmap) is disabled to prevent SIGBUS crashes.
+fff's mmap warmup maps all indexed files into memory, which causes an unrecoverable
+bus error when any mapped file is truncated or deleted during a session (editor saves,
+git operations, builds). Standard file I/O is used instead, with negligible
+performance impact for agent workloads where the index scan dominates latency.
+See [fff.nvim#294](https://github.com/dmtrKovalenko/fff.nvim/issues/294).
 ## Tool Parameters
 
 ### `grep` Tool
@@ -126,15 +132,6 @@ Search file contents with fff's fast, typo-resistant search.
 
 **Smart-case behavior:** By default (`caseSensitive: false`), fff auto-detects case sensitivity—if the pattern contains uppercase letters, it becomes case-sensitive.
 
-**Metadata returned:**
-```json
-{
-  "totalMatches": 1500,      // Total matches found before limiting
-  "returnedMatches": 1000,   // Number of matches returned (capped by limit)
-  "truncated": true,         // Whether results were truncated
-  "scanComplete": true       // Whether initial index scan finished
-}
-```
 
 **Examples:**
 ```bash
@@ -164,18 +161,6 @@ Find files and directories using fff's fuzzy search.
 | `type` | `"file" \| "directory"` | No | `"file"` | Filter results by type |
 | `limit` | `number` | No | `100` | Maximum number of results |
 
-**Metadata returned:**
-```json
-{
-  "output": ["src/index.js", "src/utils.js", ...],
-  "metadata": {
-    "totalResults": 2500,
-    "returnedResults": 100,
-    "truncated": true
-  }
-}
-```
-
 **Examples:**
 ```bash
 # Find all JavaScript files
@@ -201,6 +186,10 @@ On a Chromium-sized repo (500k files):
 |-----------|----------------|------------------|
 | Single search | 3-9s | <10ms |
 | 100 searches | 5-15min | <1s |
+
+Mmap caching is disabled for stability (see above). This adds a small
+constant overhead per grep call but does not affect index scan time or
+file/directory search speed.
 
 [Read the full fff.nvim performance analysis](https://github.com/dmtrKovalenko/fff.nvim#what-is-fff-and-why-use-it-over-ripgrep-or-fzf)
 

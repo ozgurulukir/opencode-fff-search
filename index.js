@@ -2,31 +2,81 @@ import { tool } from "@opencode-ai/plugin";
 import { FileFinder } from "@ff-labs/fff-node";
 import { minimatch } from "minimatch";
 
+// Module-level constants
+const TRAILING_SLASH_RE = /\/+$/;
+const SCAN_TIMEOUT_MS = 15000;
+const TOOL_TIMEOUT_MS = 5000;
+const MAX_LIMIT = 5000;
+const DEFAULT_GREP_LIMIT = 1000;
+const DEFAULT_GLOB_LIMIT = 100;
+const DEFAULT_MAX_MATCHES_PER_FILE = 100;
+
 /**
  * FFF Plugin - Replaces OpenCode's default file search (grep, glob)
  * with fff.nvim's fast, typo-resistant, frecency-ranked search.
  */
 
-export const FffPlugin = async ({ directory, client }) => {
-  await client.app.log({
-    body: { service: "fff-plugin", level: "info", message: `Initializing in ${directory}` },
-  });
+/**
+ * Safe logging helper - never throws, prevents logging from crashing the plugin.
+ * @param {object} client - The OpenCode client
+ * @param {string} level - Log level
+ * @param {string} message - Log message
+ */
+async function safeLog(client, level, message) {
+  try {
+    await client.app.log({ body: { service: "fff-plugin", level, message } });
+  } catch {
+    // Intentionally swallowed — logging must never crash the plugin
+  }
+}
 
-  const initResult = FileFinder.create({ basePath: directory, aiMode: true });
+/**
+ * Wait for the scan to complete or timeout.
+ * @param {Promise} scanPromise - The scan promise to wait for
+ * @param {number} timeoutMs - Timeout in milliseconds
+ * @returns {Promise<boolean>} - True if scan completed, false otherwise
+ */
+async function waitForScan(scanPromise, timeoutMs) {
+  try {
+    await Promise.race([
+      scanPromise.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Normalize path by removing trailing slashes.
+ * @param {string} path - The path to normalize
+ * @returns {string} - Normalized path without trailing slashes
+ */
+function normalizePath(path) {
+  return path.replace(TRAILING_SLASH_RE, "");
+}
+
+export const FffPlugin = async ({ directory, client }) => {
+  await safeLog(client, "info", `Initializing in ${directory}`);
+
+  const initResult = FileFinder.create({
+    basePath: directory,
+    aiMode: true,
+    disableMmapCache: true,
+    disableContentIndexing: true,
+  });
   if (!initResult.ok) {
-    await client.app.log({
-      body: { service: "fff-plugin", level: "error", message: `fff init failed: ${initResult.error}` },
-    });
+    await safeLog(client, "error", `fff init failed: ${initResult.error}`);
     throw new Error(`fff initialization failed: ${initResult.error}`);
   }
 
   const finder = initResult.value;
-  const scanPromise = finder.waitForScan(15000).catch(() => undefined);
-  scanPromise.then(() => {
-    client.app.log({ body: { service: "fff-plugin", level: "info", message: "Initial fff scan complete" } });
-  });
-
-  await client.app.log({ body: { service: "fff-plugin", level: "info", message: "About to return tool definitions" } });
+  const scanPromise = finder.waitForScan(SCAN_TIMEOUT_MS).catch(() => undefined);
+  scanPromise.then(
+    () => safeLog(client, "info", "Initial fff scan complete"),
+    () => {}, // Already caught above, but guard against edge cases
+  );
 
   return {
     tool: {
@@ -40,60 +90,66 @@ export const FffPlugin = async ({ directory, client }) => {
           context: tool.schema.number().optional(),
           limit: tool.schema.number().optional(),
         },
-         async execute(args, context) {
+        async execute(args, context) {
           try {
-            if (context.abort.aborted) throw new Error("Aborted");
-
-            let scanCompleted = false;
-            try {
-              await Promise.race([
-                scanPromise.then(() => { scanCompleted = true; }),
-                new Promise((resolve) => setTimeout(resolve, 5000)),
-              ]);
-            } catch (err) {
-              await client.app.log({ body: { service: "fff-plugin", level: "warn", message: `scan wait error: ${err}` } });
+            if (!args.pattern || typeof args.pattern !== "string" || args.pattern.trim() === "") {
+              throw new Error("pattern must be a non-empty string");
             }
+            if (args.limit && (typeof args.limit !== "number" || args.limit < 1 || args.limit > MAX_LIMIT)) {
+              throw new Error(`limit must be a number between 1 and ${MAX_LIMIT}`);
+            }
+            if (args.context && (typeof args.context !== "number" || args.context < 0)) {
+              throw new Error("context must be a non-negative number");
+            }
+
             if (context.abort.aborted) throw new Error("Aborted");
 
+            await waitForScan(scanPromise, TOOL_TIMEOUT_MS);
+            if (context.abort.aborted) throw new Error("Aborted");
+
+            const userLimit = args.limit || DEFAULT_GREP_LIMIT;
             const opts = {
               smartCase: args.caseSensitive !== true,
               beforeContext: args.context ?? 0,
               afterContext: args.context ?? 0,
-              maxMatchesPerFile: args.limit ? Math.min(args.limit, 500) : 100,
+              maxMatchesPerFile: Math.min(userLimit, DEFAULT_MAX_MATCHES_PER_FILE),
             };
 
             const result = finder.grep(args.pattern, opts);
             if (!result.ok) {
-              await client.app.log({ body: { service: "fff-plugin", level: "error", message: `fff grep error: ${result.error}` } });
+              await safeLog(client, "error", `fff grep error: ${result.error}`);
               throw new Error(`fff grep error: ${result.error}`);
             }
 
-            let matches = result.value.items;
+            let matches = result.value?.items;
+
+            if (!Array.isArray(matches)) {
+              await safeLog(client, "warn", `fff grep returned unexpected result structure`);
+              return "";
+            }
 
             if (args.path) {
-              const target = args.path.replace(/\/+$/, "");
+              const target = normalizePath(args.path);
               matches = matches.filter((m) => m.relativePath === target || m.relativePath.startsWith(target + "/"));
             }
 
             if (args.exclude) {
               const patterns = args.exclude.split(",").map((p) => p.trim()).filter(Boolean);
-              matches = matches.filter((m) => !patterns.some((pat) => minimatch(m.relativePath, pat, { dot: true })));
+              const compiledPatterns = patterns.map((pat) => (path) => minimatch(path, pat, { dot: true }));
+              matches = matches.filter((m) => !compiledPatterns.some((test) => test(m.relativePath)));
             }
 
-            const totalMatches = matches.length;
-            const limit = Math.max(1, args.limit || 1000);
-            const truncated = totalMatches > limit;
-            const returnedMatches = truncated ? matches.slice(0, limit) : matches;
+            const limit = Math.max(1, userLimit);
+            const returnedMatches = matches.length > limit ? matches.slice(0, limit) : matches;
 
-            // Format as traditional grep output: file:line_number:line_content
-            const lines = returnedMatches.map(m => `${m.relativePath}:${m.lineNumber}:${m.lineContent}`);
-            return lines.join('\n');
+            const lines = returnedMatches.map((m) => `${m.relativePath}:${m.lineNumber}:${m.lineContent}`);
+            return lines.join("\n");
           } catch (err) {
-            await client.app.log({ body: { service: "fff-plugin", level: "error", message: `grep EXECUTE EXCEPTION: ${err.message}\n${err.stack}` } });
+            await safeLog(client, "error", `grep error: ${err.message}`);
             throw err;
           }
-         },
-       }),
+        },
+      }),
 
       glob: tool({
         description: "Find files and directories using fff's fast fuzzy search.",
@@ -104,48 +160,49 @@ export const FffPlugin = async ({ directory, client }) => {
           limit: tool.schema.number().optional(),
         },
         async execute(args, context) {
-          await client.app.log({
-            body: { service: "fff-plugin", level: "info", message: `fff_glob execute: ${JSON.stringify(args)}` },
-          });
-          if (context.abort.aborted) throw new Error("Aborted");
-
-          let scanCompleted = false;
           try {
-            await Promise.race([
-              scanPromise.then(() => { scanCompleted = true; }),
-              new Promise((resolve) => setTimeout(resolve, 5000)),
-            ]);
-          } catch {
-            // ignore timeout
+            if (!args.pattern || typeof args.pattern !== "string" || args.pattern.trim() === "") {
+              throw new Error("pattern must be a non-empty string");
+            }
+            if (args.limit && (typeof args.limit !== "number" || args.limit < 1 || args.limit > MAX_LIMIT)) {
+              throw new Error(`limit must be a number between 1 and ${MAX_LIMIT}`);
+            }
+
+            if (context.abort.aborted) throw new Error("Aborted");
+
+            await waitForScan(scanPromise, TOOL_TIMEOUT_MS);
+            if (context.abort.aborted) throw new Error("Aborted");
+
+            const pageSize = Math.max(1, args.limit || DEFAULT_GLOB_LIMIT);
+            let items;
+
+            if (args.type === "directory") {
+              const dirResult = finder.dirSearch(args.pattern, { pageSize });
+              if (!dirResult.ok) throw new Error(`fff dirSearch error: ${dirResult.error}`);
+              items = dirResult.value?.items;
+            } else {
+              const fileResult = finder.fileSearch(args.pattern, { pageSize });
+              if (!fileResult.ok) throw new Error(`fff fileSearch error: ${fileResult.error}`);
+              items = fileResult.value?.items;
+            }
+
+            if (!Array.isArray(items)) {
+              await safeLog(client, "warn", `fff glob returned unexpected result structure`);
+              return "";
+            }
+
+            let result = items.map((item) => item.relativePath);
+
+            if (args.path) {
+              const target = normalizePath(args.path);
+              result = result.filter((p) => p === target || p.startsWith(target + "/"));
+            }
+
+            return result.join("\n");
+          } catch (err) {
+            await safeLog(client, "error", `glob error: ${err.message}`);
+            throw err;
           }
-          await client.app.log({
-            body: { service: "fff-plugin", level: "info", message: `scanCompleted=${scanCompleted}` },
-          });
-          if (context.abort.aborted) throw new Error("Aborted");
-
-          const pageSize = Math.max(1, args.limit || 100);
-          let result;
-
-          if (args.type === "directory") {
-            const dirResult = finder.dirSearch(args.pattern, { pageSize });
-            if (!dirResult.ok) throw new Error(`fff dirSearch error: ${dirResult.error}`);
-            result = dirResult.value.items.map((d) => d.relativePath);
-          } else {
-            const fileResult = finder.fileSearch(args.pattern, { pageSize });
-            if (!fileResult.ok) throw new Error(`fff fileSearch error: ${fileResult.error}`);
-            result = fileResult.value.items.map((f) => f.relativePath);
-          }
-
-          if (args.path) {
-            const target = args.path.replace(/\/+$/, "");
-            result = result.filter((p) => p === target || p.startsWith(target + "/"));
-          }
-
-          const output = result.join("\n");
-          await client.app.log({
-            body: { service: "fff-plugin", level: "info", message: `fff_glob returning ${result.length} items (${output.length} chars)` },
-          });
-          return output;
         },
       }),
     },
