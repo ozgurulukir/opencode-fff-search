@@ -8,11 +8,6 @@ import { minimatch } from "minimatch";
  */
 
 export const FffPlugin = async ({ directory, client }) => {
-  // Immediate log to verify plugin is executing
-  await client.app.log({
-    body: { service: "fff-plugin", level: "info", message: `PLUGIN STARTUP in ${directory}` },
-  });
-
   await client.app.log({
     body: { service: "fff-plugin", level: "info", message: `Initializing in ${directory}` },
   });
@@ -45,9 +40,6 @@ export const FffPlugin = async ({ directory, client }) => {
         },
          async execute(args, context) {
           try {
-            await client.app.log({
-              body: { service: "fff-plugin", level: "debug", message: `grep execute START: pattern=${args.pattern}` },
-            });
             if (context.abort.aborted) throw new Error("Aborted");
 
             let scanCompleted = false;
