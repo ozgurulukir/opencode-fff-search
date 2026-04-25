@@ -57,26 +57,36 @@ function normalizePath(path) {
   return path.replace(TRAILING_SLASH_RE, "");
 }
 
+// Module-level instance cache to prevent leaking background watcher threads
+// which use mmap and can cause SIGBUS crashes if multiple are running.
+const instances = new Map();
+
 export const FffPlugin = async ({ directory, client }) => {
   await safeLog(client, "info", `Initializing in ${directory}`);
 
-  const initResult = FileFinder.create({
-    basePath: directory,
-    aiMode: true,
-    disableMmapCache: true,
-    disableContentIndexing: true,
-  });
-  if (!initResult.ok) {
-    await safeLog(client, "error", `fff init failed: ${initResult.error}`);
-    throw new Error(`fff initialization failed: ${initResult.error}`);
+  if (!instances.has(directory)) {
+    const initResult = FileFinder.create({
+      basePath: directory,
+      aiMode: true,
+      disableMmapCache: true,
+      disableContentIndexing: true,
+    });
+    if (!initResult.ok) {
+      await safeLog(client, "error", `fff init failed: ${initResult.error}`);
+      throw new Error(`fff initialization failed: ${initResult.error}`);
+    }
+
+    const finder = initResult.value;
+    const scanPromise = finder.waitForScan(SCAN_TIMEOUT_MS).catch(() => undefined);
+    scanPromise.then(
+      () => safeLog(client, "info", "Initial fff scan complete"),
+      () => {}, // Already caught above, but guard against edge cases
+    );
+
+    instances.set(directory, { finder, scanPromise });
   }
 
-  const finder = initResult.value;
-  const scanPromise = finder.waitForScan(SCAN_TIMEOUT_MS).catch(() => undefined);
-  scanPromise.then(
-    () => safeLog(client, "info", "Initial fff scan complete"),
-    () => {}, // Already caught above, but guard against edge cases
-  );
+  const { finder, scanPromise } = instances.get(directory);
 
   return {
     tool: {
