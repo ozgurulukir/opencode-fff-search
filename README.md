@@ -70,9 +70,9 @@ cd opencode-fff-search
 
 For Windows, run the equivalent commands manually or use WSL.
 
-### Option 3: From npm (once published - easiest)
+### Option 3: From npm (published)
 
-Add to your OpenCode config (`opencode.json`):
+Add to your OpenCode config (`opencode.json` or `opencode.jsonc`):
 
 ```json
 {
@@ -81,6 +81,12 @@ Add to your OpenCode config (`opencode.json`):
 ```
 
 OpenCode will auto-install the plugin and its dependencies on next startup.
+
+Alternatively, install globally:
+
+```bash
+npm install -g opencode-fff-search
+```
 
 ## Verification
 
