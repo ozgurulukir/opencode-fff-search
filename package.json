@@ -1,6 +1,6 @@
 {
   "name": "opencode-fff-search",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode plugin that replaces default grep/glob with fff.nvim's ultra-fast search",
   "type": "module",
   "main": "index.js",
