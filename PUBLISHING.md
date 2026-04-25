@@ -39,14 +39,24 @@
 
 ## npm
 
-1. **Create an npm account** (if you don't have one):
-   - Go to https://www.npmjs.com/signup
-   - Verify your email
+**⚠️ Prerequisite:** You must be logged into npm before publishing.
 
-2. **Login to npm from terminal:**
+1. **Check current login status:**
+   ```bash
+   npm whoami
+   ```
+
+   If not logged in, proceed to step 2. If already logged in, skip to step 3.
+
+2. **Login to npm:**
    ```bash
    npm login
-   # Enter username, password, and email
+   # Enter username, password, and email (use one-time password if 2FA enabled)
+   ```
+
+   For accounts with 2FA, you'll need an OTP. After `npm login`, you may need:
+   ```bash
+   npm profile enable-2fa  # if not already enabled
    ```
 
 3. **Publish the package:**
@@ -55,14 +65,38 @@
    npm publish --access public
    ```
 
-   Note: If this is a scoped package (e.g., `@yourname/opencode-fff-search`), use:
-   ```bash
-   npm publish --access public
+   Expected output:
    ```
-   For unscoped packages, just `npm publish` (they're public by default).
+   npm notice 📦  opencode-fff-search@0.2.0
+   npm notice Tarball Contents ...
+   + opencode-fff-search@0.2.0
+   ```
 
-4. **Verify:**
-   Visit https://www.npmjs.com/package/opencode-fff-search (or your package name)
+4. **Verify publication:**
+   ```bash
+   npm view opencode-fff-search version
+   # Should output: 0.2.0
+   ```
+   Or visit: https://www.npmjs.com/package/opencode-fff-search
+
+**Troubleshooting:**
+- **"need auth" or "ENEEDAUTH"** → Run `npm login` first
+- **"You do not have permission to publish"** → Ensure you own the package name (check with `npm whoami`)
+- **"Package name already taken"** → The package `opencode-fff-search` is already published by another user. You'll need to use a scoped name like `@yourusername/opencode-fff-search` and update `package.json` accordingly.
+- **2FA required** → After `npm login`, you'll be prompted for OTP. If publishing fails with "needs 2FA", run `npm publish --otp <your-otp>`.
+
+---
+
+## Quick Checklist (Current Status)
+
+- [x] GitHub repository created: https://github.com/ozgurulukir/opencode-fff-search
+- [x] README with full installation/usage docs
+- [x] LICENSE (MIT)
+- [x] Git tags and releases created (v0.1.0, v0.1.1, v0.2.0)
+- [x] Plugin tested and verified working
+- [x] README updated with npm installation method
+- [ ] **npm login performed** ← *This is the only remaining step*
+- [ ] npm package published (once logged in)
 
 ## Post-Publish
 
