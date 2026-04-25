@@ -26,6 +26,8 @@ export const FffPlugin = async ({ directory, client }) => {
     client.app.log({ body: { service: "fff-plugin", level: "info", message: "Initial fff scan complete" } });
   });
 
+  await client.app.log({ body: { service: "fff-plugin", level: "info", message: "About to return tool definitions" } });
+
   return {
     tool: {
       grep: tool({
@@ -90,8 +92,8 @@ export const FffPlugin = async ({ directory, client }) => {
             await client.app.log({ body: { service: "fff-plugin", level: "error", message: `grep EXECUTE EXCEPTION: ${err.message}\n${err.stack}` } });
             throw err;
           }
-        },
-      }),
+         },
+       }),
 
       glob: tool({
         description: "Find files and directories using fff's fast fuzzy search.",
@@ -102,6 +104,9 @@ export const FffPlugin = async ({ directory, client }) => {
           limit: tool.schema.number().optional(),
         },
         async execute(args, context) {
+          await client.app.log({
+            body: { service: "fff-plugin", level: "info", message: `fff_glob execute: ${JSON.stringify(args)}` },
+          });
           if (context.abort.aborted) throw new Error("Aborted");
 
           let scanCompleted = false;
@@ -111,8 +116,11 @@ export const FffPlugin = async ({ directory, client }) => {
               new Promise((resolve) => setTimeout(resolve, 5000)),
             ]);
           } catch {
-            // ignore
+            // ignore timeout
           }
+          await client.app.log({
+            body: { service: "fff-plugin", level: "info", message: `scanCompleted=${scanCompleted}` },
+          });
           if (context.abort.aborted) throw new Error("Aborted");
 
           const pageSize = Math.max(1, args.limit || 100);
@@ -120,15 +128,11 @@ export const FffPlugin = async ({ directory, client }) => {
 
           if (args.type === "directory") {
             const dirResult = finder.dirSearch(args.pattern, { pageSize });
-            if (!dirResult.ok) {
-              throw new Error(`fff dirSearch error: ${dirResult.error}`);
-            }
+            if (!dirResult.ok) throw new Error(`fff dirSearch error: ${dirResult.error}`);
             result = dirResult.value.items.map((d) => d.relativePath);
           } else {
             const fileResult = finder.fileSearch(args.pattern, { pageSize });
-            if (!fileResult.ok) {
-              throw new Error(`fff fileSearch error: ${fileResult.error}`);
-            }
+            if (!fileResult.ok) throw new Error(`fff fileSearch error: ${fileResult.error}`);
             result = fileResult.value.items.map((f) => f.relativePath);
           }
 
@@ -137,7 +141,11 @@ export const FffPlugin = async ({ directory, client }) => {
             result = result.filter((p) => p === target || p.startsWith(target + "/"));
           }
 
-          return result.join("\n");
+          const output = result.join("\n");
+          await client.app.log({
+            body: { service: "fff-plugin", level: "info", message: `fff_glob returning ${result.length} items (${output.length} chars)` },
+          });
+          return output;
         },
       }),
     },
