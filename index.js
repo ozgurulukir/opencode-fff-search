@@ -2,6 +2,11 @@ import { tool } from "@opencode-ai/plugin";
 import { FileFinder } from "@ff-labs/fff-node";
 import { minimatch } from "minimatch";
 
+/**
+ * FFF Plugin - Replaces OpenCode's default file search (grep, glob)
+ * with fff.nvim's fast, typo-resistant, frecency-ranked search.
+ */
+
 export const FffPlugin = async ({ directory, client }) => {
   await client.app.log({
     body: { service: "fff-plugin", level: "info", message: `Initializing in ${directory}` },
@@ -16,8 +21,6 @@ export const FffPlugin = async ({ directory, client }) => {
   }
 
   const finder = initResult.value;
-
-  // Start scanning (non-blocking)
   const scanPromise = finder.waitForScan(15000).catch(() => undefined);
   scanPromise.then(() => {
     client.app.log({ body: { service: "fff-plugin", level: "info", message: "Initial fff scan complete" } });
@@ -28,7 +31,7 @@ export const FffPlugin = async ({ directory, client }) => {
       grep: tool({
         description: "Search file contents using fff (fast, typo-resistant, frecency-ranked).",
         args: {
-          pattern: tool.schema.string(),
+          pattern: tool.schema.string().describe("Search pattern"),
           path: tool.schema.string().optional(),
           exclude: tool.schema.string().optional(),
           caseSensitive: tool.schema.boolean().optional(),
@@ -36,10 +39,8 @@ export const FffPlugin = async ({ directory, client }) => {
           limit: tool.schema.number().optional(),
         },
         async execute(args, context) {
-          // Respect cancellation
           if (context.abort.aborted) throw new Error("Aborted");
 
-          // Wait for scan with timeout so Esc works
           try {
             await Promise.race([
               scanPromise,
@@ -62,19 +63,16 @@ export const FffPlugin = async ({ directory, client }) => {
 
           let matches = result.value.items;
 
-          // Path filter
           if (args.path) {
             const target = args.path.replace(/\/+$/, "");
             matches = matches.filter((m) => m.relativePath === target || m.relativePath.startsWith(target + "/"));
           }
 
-          // Exclude filter
           if (args.exclude) {
             const patterns = args.exclude.split(",").map((p) => p.trim()).filter(Boolean);
             matches = matches.filter((m) => !patterns.some((pat) => minimatch(m.relativePath, pat, { dot: true })));
           }
 
-          // Apply limit
           const totalMatches = matches.length;
           const limit = Math.max(1, args.limit || 1000);
           const truncated = totalMatches > limit;
@@ -87,7 +85,6 @@ export const FffPlugin = async ({ directory, client }) => {
             scanComplete: (await scanPromise.catch(() => undefined)) !== undefined,
           });
 
-          // Return array of match objects (framework will serialize)
           return returnedMatches.map((m) => ({
             path: m.relativePath,
             line_number: m.lineNumber,
@@ -115,7 +112,7 @@ export const FffPlugin = async ({ directory, client }) => {
               new Promise((resolve) => setTimeout(resolve, 5000)),
             ]);
           } catch {
-            // ignore timeout
+            // ignore
           }
           if (context.abort.aborted) throw new Error("Aborted");
 
@@ -124,21 +121,24 @@ export const FffPlugin = async ({ directory, client }) => {
 
           if (args.type === "directory") {
             const dirResult = finder.dirSearch(args.pattern, { pageSize });
-            if (!dirResult.ok) throw new Error(`fff dirSearch error: ${dirResult.error}`);
+            if (!dirResult.ok) {
+              throw new Error(`fff dirSearch error: ${dirResult.error}`);
+            }
             result = dirResult.value.items.map((d) => d.relativePath);
           } else {
             const fileResult = finder.fileSearch(args.pattern, { pageSize });
-            if (!fileResult.ok) throw new Error(`fff fileSearch error: ${fileResult.error}`);
+            if (!fileResult.ok) {
+              throw new Error(`fff fileSearch error: ${fileResult.error}`);
+            }
             result = fileResult.value.items.map((f) => f.relativePath);
           }
 
-          // Path filter
           if (args.path) {
             const target = args.path.replace(/\/+$/, "");
             result = result.filter((p) => p === target || p.startsWith(target + "/"));
           }
 
-          return { output: result };
+          return result.join("\n");
         },
       }),
     },
