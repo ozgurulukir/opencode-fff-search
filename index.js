@@ -109,6 +109,7 @@ export const FffPlugin = async ({ directory, client }) => {
 
             const userLimit = args.limit || DEFAULT_GREP_LIMIT;
             const opts = {
+              mode: "regex",
               smartCase: args.caseSensitive !== true,
               beforeContext: args.context ?? 0,
               afterContext: args.context ?? 0,
