@@ -32,7 +32,8 @@
     "@opencode-ai/plugin": ">=1.14.0"
   },
   "dependencies": {
-    "@ff-labs/fff-node": "^0.6.4"
+    "@ff-labs/fff-node": "^0.6.4",
+    "minimatch": "^9.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

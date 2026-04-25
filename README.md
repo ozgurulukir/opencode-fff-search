@@ -103,6 +103,90 @@ This plugin overrides OpenCode's built-in `grep` and `glob` tools. When the AI (
 - **`grep`** → fff's content search with smart-case, regex, and fuzzy modes
 - **`glob`** → fff's fuzzy file finder with frecency ranking
 
+## Tool Parameters
+
+### `grep` Tool
+
+Search file contents with fff's fast, typo-resistant search.
+
+| Parameter | Type | Required? | Default | Description |
+|-----------|------|-----------|---------|-------------|
+| `pattern` | `string` | Yes | — | Search pattern (plain text, regex, or fuzzy) |
+| `path` | `string` | No | — | Subdirectory or file to search within |
+| `exclude` | `string` | No | — | Comma-separated glob patterns to exclude (e.g., `"*.log,node_modules/**"`) |
+| `caseSensitive` | `boolean` | No | `false` (smart-case) | Enable case-sensitive matching |
+| `context` | `number` | No | `0` | Number of lines before/after match to include |
+| `limit` | `number` | No | `1000` | Maximum total matches to return |
+
+**Smart-case behavior:** By default (`caseSensitive: false`), fff auto-detects case sensitivity—if the pattern contains uppercase letters, it becomes case-sensitive.
+
+**Metadata returned:**
+```json
+{
+  "totalMatches": 1500,      // Total matches found before limiting
+  "returnedMatches": 1000,   // Number of matches returned (capped by limit)
+  "truncated": true,         // Whether results were truncated
+  "scanComplete": true       // Whether initial index scan finished
+}
+```
+
+**Examples:**
+```bash
+# Simple search
+opencode run "Search for 'import' using grep"
+
+# Case-sensitive search in src directory, excluding node_modules
+opencode run "Search for 'TODO' using grep with {\"path\": \"src\", \"caseSensitive\": true, \"exclude\": \"*.test.js\"}"
+
+# Get context lines around matches
+opencode run "Search for 'function' using grep with {\"context\": 3}"
+
+# Limit results to first 50 matches
+opencode run "Search for 'console.log' using grep with {\"limit\": 50}"
+```
+
+---
+
+### `glob` Tool
+
+Find files and directories using fff's fuzzy search.
+
+| Parameter | Type | Required? | Default | Description |
+|-----------|------|-----------|---------|-------------|
+| `pattern` | `string` | Yes | — | Search pattern (fuzzy, glob, or plain text) |
+| `path` | `string` | No | — | Subdirectory to search within |
+| `type` | `"file" \| "directory"` | No | `"file"` | Filter results by type |
+| `limit` | `number` | No | `100` | Maximum number of results |
+
+**Metadata returned:**
+```json
+{
+  "output": ["src/index.js", "src/utils.js", ...],
+  "metadata": {
+    "totalResults": 2500,
+    "returnedResults": 100,
+    "truncated": true
+  }
+}
+```
+
+**Examples:**
+```bash
+# Find all JavaScript files
+opencode run "Find files matching '*.js' using glob"
+
+# Find directories only
+opencode run "Find files matching 'src' using glob with {\"type\": \"directory\"}"
+
+# Search within a subdirectory
+opencode run "Find files matching 'config' using glob with {\"path\": \"src\"}"
+
+# Increase result limit
+opencode run "Find files matching '*' using glob with {\"limit\": 500}"
+```
+
+---
+
 ## Performance
 
 On a Chromium-sized repo (500k files):
