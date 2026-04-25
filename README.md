@@ -1,80 +1,78 @@
 # opencode-fff-search
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 OpenCode plugin that replaces the default `grep` and `glob` file search tools with [fff.nvim](https://github.com/dmtrKovalenko/fff.nvim)'s ultra-fast, typo-resistant, frecency-ranked search engine.
 
 ## Features
 
-- **Blazing fast** - In-memory index means searches complete in milliseconds, no process spawn overhead
-- **Typo-resistant** - Smith-Waterman fuzzy matching handles typos and partial matches gracefully
-- **Frecency-ranked** - Files you use often rank higher in results
-- **Git-aware** - Shows modified, staged, untracked status
-- **Smart case** - Auto-detects case sensitivity needs
-- **Definition highlighting** - Classifies code definitions (functions, classes, etc.)
-- **Background watching** - Index stays up-to-date as files change
+- **Blazing fast** - In-memory index, searches complete in milliseconds
+- **Typo-resistant** - Fuzzy matching handles typos gracefully
+- **Frecency-ranked** - Frequently accessed files rank higher
+- **Git-aware** - Shows file status (modified, staged, untracked)
+- **Smart case** - Auto-detects case sensitivity
+- **Zero config** - Works out of the box
 
 ## Prerequisites
 
 - OpenCode 1.14+
-- Node.js 18+ (for the fff-node SDK)
-- Linux, macOS, or Windows
+- Node.js 18+ (or Bun)
+- **Cross-platform:** Linux, macOS, Windows (WSL recommended for Windows)
 
 ## Installation
 
-### Local Plugin (Manual)
+### Option 1: Manual Installation (All Platforms)
 
-1. **Create the plugin directory:**
+1. **Copy the plugin to your OpenCode plugins directory:**
 
+   **Linux/macOS:**
    ```bash
-   # Global (all projects)
    mkdir -p ~/.config/opencode/plugins
-
-   # OR project-specific
-   mkdir -p /path/to/your/project/.opencode/plugins
+   cp index.js ~/.config/opencode/plugins/opencode-fff-search.js
    ```
 
-2. **Copy the plugin file:**
+   **Windows (PowerShell):**
+   ```powershell
+   New-Item -ItemType Directory -Force "$env:APPDATA\opencode\plugins"
+   Copy-Item index.js "$env:APPDATA\opencode\plugins\opencode-fff-search.js"
+   ```
 
-   Download `index.js` from this repo and place it in the plugins directory:
-
+   **Or project-specific (any OS):**
    ```bash
-   # Global
-   cp index.js ~/.config/opencode/plugins/opencode-fff-search.js
-
-   # OR project-specific
+   mkdir -p /path/to/project/.opencode/plugins
    cp index.js /path/to/project/.opencode/plugins/
    ```
 
-3. **Add dependencies to OpenCode's package.json:**
+2. **Install dependencies:**
 
+   Navigate to your OpenCode config directory and install:
+
+   **Linux/macOS:**
    ```bash
-   # Edit ~/.opencode/package.json (global) or project/.opencode/package.json
+   cd ~/.config/opencode  # or ~/.opencode for project-local
+   bun install            # or: npm install
    ```
 
-   ```json
-   {
-     "type": "module",
-     "dependencies": {
-       "@ff-labs/fff-node": "^0.6.4"
-     }
-   }
+   **Windows:**
+   ```powershell
+   cd "$env:APPDATA\opencode"
+   bun install
+   # or: npm install
    ```
 
-4. **Install dependencies:**
+   This installs `@ff-labs/fff-node` and downloads the platform-specific fff binary automatically.
 
-   OpenCode uses Bun by default. If Bun is not available, it falls back to npm.
+### Option 2: Using the install script
 
-   ```bash
-   cd ~/.opencode  # or your project's .opencode directory
-   bun install      # or: npm install
-   ```
+```bash
+git clone https://github.com/ozgurulukir/opencode-fff-search.git
+cd opencode-fff-search
+./install.sh  # Works on Linux/macOS
+```
 
-   The fff native binary will be downloaded automatically on first use.
+For Windows, run the equivalent commands manually or use WSL.
 
-### NPM Package (Easier - Coming Soon)
+### Option 3: From npm (once published - easiest)
 
-Once published to npm, you can install via OpenCode config:
+Add to your OpenCode config (`opencode.json`):
 
 ```json
 {
@@ -82,67 +80,104 @@ Once published to npm, you can install via OpenCode config:
 }
 ```
 
-And OpenCode will auto-install it.
-
-## How It Works
-
-This plugin overrides OpenCode's built-in `grep` and `glob` tools. When the AI (or you) uses file search:
-
-- `grep` → uses fff's fast content search
-- `glob` → uses fff's fuzzy file finder
-
-All searches benefit from fff's in-memory index, which is built once at startup and kept warm. Subsequent searches are ~10-100x faster than spawning `ripgrep` each time.
-
-## Performance
-
-On a large codebase (100k+ files), typical improvements:
-
-| Operation | ripgrep (spawn) | fff (in-memory) |
-|-----------|----------------|-----------------|
-| First search | 3-9s | 500ms-2s (warm-up) |
-| Subsequent searches | 3-9s each | <10ms each |
-| 100 searches total | 5-15 minutes | <1 second |
-
-See the [fff.nvim benchmarks](https://github.com/dmtrKovalenko/fff.nvim#what-is-fff-and-why-use-it-over-ripgrep-or-fzf) for more details.
+OpenCode will auto-install the plugin and its dependencies on next startup.
 
 ## Verification
 
-After installing, restart OpenCode and run:
+Restart OpenCode and run:
 
 ```bash
-opencode run "Use grep to search for 'function'"
+opencode run "Search for 'import' using grep"
 ```
 
-You should see faster results. The plugin logs its status to OpenCode's logs at startup.
+You should notice faster search results. Check debug logs if needed:
+
+```bash
+opencode debug config --print-logs 2>&1 | grep fff
+```
+
+## How It Works
+
+This plugin overrides OpenCode's built-in `grep` and `glob` tools. When the AI (or user) performs file search, it uses fff's in-memory index instead of spawning ripgrep processes.
+
+- **`grep`** → fff's content search with smart-case, regex, and fuzzy modes
+- **`glob`** → fff's fuzzy file finder with frecency ranking
+
+## Performance
+
+On a Chromium-sized repo (500k files):
+
+| Operation | ripgrep (spawn) | fff (warm cache) |
+|-----------|----------------|------------------|
+| Single search | 3-9s | <10ms |
+| 100 searches | 5-15min | <1s |
+
+[Read the full fff.nvim performance analysis](https://github.com/dmtrKovalenko/fff.nvim#what-is-fff-and-why-use-it-over-ripgrep-or-fzf)
+
+## Platform-Specific Notes
+
+### Windows
+- **WSL recommended** for best OpenCode experience
+- Native Windows works but ensure Node.js is in PATH
+- fff binary: `@ff-labs/fff-bin-win32-x64` (or `-arm64` for ARM)
+
+### macOS
+- Works on both Intel (`x64`) and Apple Silicon (`arm64`)
+- fff binaries auto-download: `@ff-labs/fff-bin-darwin-x64` or `-arm64`
+
+### Linux
+- Multiple variants supported (GNU, musl)
+- Auto-detects correct binary via npm optional dependencies
 
 ## Troubleshooting
 
 ### Plugin not loading
-- Ensure the plugin file is in `~/.config/opencode/plugins/` or `.opencode/plugins/`
-- Check file has `.js` extension (not `.ts` unless you have TypeScript support)
-- Verify `@ff-labs/fff-node` is in `node_modules/`
+- Ensure plugin file is in correct `plugins/` directory (check with `find ~/.config/opencode/plugins`)
+- Verify `~/.config/opencode/package.json` has `"type": "module"`
+- Check dependencies installed: `ls ~/.config/opencode/node_modules/@ff-labs/fff-node`
 
-### Binary download fails
-- Manually install: `npm install @ff-labs/fff-bin-linux-x64-gnu` (adjust for your OS/arch)
-- See [fff.nvim releases](https://github.com/dmtrKovalenko/fff.nvim/releases) for prebuilt binaries
+### "Binary not found" errors
+The fff native library didn't download. Install manually:
+
+```bash
+# Linux x64 (most common)
+npm install @ff-labs/fff-bin-linux-x64-gnu
+
+# macOS Intel
+npm install @ff-labs/fff-bin-darwin-x64
+
+# macOS Apple Silicon
+npm install @ff-labs/fff-bin-darwin-arm64
+
+# Windows x64 (in WSL or native)
+npm install @ff-labs/fff-bin-win32-x64
+```
+
+See [all platform packages](https://www.npmjs.com/package/@ff-labs/fff-node?activeTab=dependencies).
+
+### Slow first search
+The first search triggers index building (typically 500ms-2s depending on repo size). Subsequent searches are instant. The index persists in memory while OpenCode runs.
 
 ### Permission errors
-- The plugin runs with same permissions as OpenCode
 - Ensure you have read access to the project directory
+- On Linux/macOS: check file permissions
+- On Windows: run terminal as admin if accessing protected directories
 
 ## Development
 
 ```bash
-# Clone and set up
-git clone <this-repo>
+git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search
 npm install
 
-# Test the plugin directly
-node -e "import('./index.js').then(m => console.log('OK'))"
+# Test the plugin loads correctly
+node -e "import('./index.js').then(m => console.log('Plugin loads OK'))"
 
 # Link for local development (global)
 ln -sf $(pwd)/index.js ~/.config/opencode/plugins/opencode-fff-search.js
+
+# Or on Windows (PowerShell):
+# New-Item -ItemType SymbolicLink -Path "$env:APPDATA\opencode\plugins\opencode-fff-search.js" -Value "$(Get-Location)\index.js"
 ```
 
 ## License
@@ -151,9 +186,20 @@ MIT - see [LICENSE](LICENSE) file.
 
 ## Credits
 
-- [fff.nvim](https://github.com/dmtrKovalenko/fff.nvim) - The fast file finder
+- [fff.nvim](https://github.com/dmtrKovalenko/fff.nvim) - Fast file finder library
 - [OpenCode](https://github.com/anomalyco/opencode) - AI coding agent
 
 ## Contributing
 
-Issues and PRs welcome! Please test against a real OpenCode session and include performance metrics if applicable.
+PRs welcome! Please:
+
+1. Test with a real OpenCode session
+2. Include benchmark results if optimizing performance
+3. Follow existing code style (no semicolons, 2-space indent)
+4. Update README if changing behavior
+
+## Related
+
+- [fff.nvim GitHub](https://github.com/dmtrKovalenko/fff.nvim) - The underlying search engine
+- [OpenCode Plugins Docs](https://opencode.ai/docs/plugins) - Plugin development guide
+- [OpenCode Ecosystem](https://opencode.ai/docs/ecosystem) - Other community plugins
