@@ -8,6 +8,11 @@ import { minimatch } from "minimatch";
  */
 
 export const FffPlugin = async ({ directory, client }) => {
+  // Immediate log to verify plugin is executing
+  await client.app.log({
+    body: { service: "fff-plugin", level: "info", message: `PLUGIN STARTUP in ${directory}` },
+  });
+
   await client.app.log({
     body: { service: "fff-plugin", level: "info", message: `Initializing in ${directory}` },
   });
@@ -38,60 +43,61 @@ export const FffPlugin = async ({ directory, client }) => {
           context: tool.schema.number().optional(),
           limit: tool.schema.number().optional(),
         },
-        async execute(args, context) {
-          if (context.abort.aborted) throw new Error("Aborted");
-
+         async execute(args, context) {
           try {
-            await Promise.race([
-              scanPromise,
-              new Promise((resolve) => setTimeout(resolve, 5000)),
-            ]);
-          } catch {
-            // ignore
+            await client.app.log({
+              body: { service: "fff-plugin", level: "debug", message: `grep execute START: pattern=${args.pattern}` },
+            });
+            if (context.abort.aborted) throw new Error("Aborted");
+
+            let scanCompleted = false;
+            try {
+              await Promise.race([
+                scanPromise.then(() => { scanCompleted = true; }),
+                new Promise((resolve) => setTimeout(resolve, 5000)),
+              ]);
+            } catch (err) {
+              await client.app.log({ body: { service: "fff-plugin", level: "warn", message: `scan wait error: ${err}` } });
+            }
+            if (context.abort.aborted) throw new Error("Aborted");
+
+            const opts = {
+              smartCase: args.caseSensitive !== true,
+              beforeContext: args.context ?? 0,
+              afterContext: args.context ?? 0,
+              maxMatchesPerFile: args.limit ? Math.min(args.limit, 500) : 100,
+            };
+
+            const result = finder.grep(args.pattern, opts);
+            if (!result.ok) {
+              await client.app.log({ body: { service: "fff-plugin", level: "error", message: `fff grep error: ${result.error}` } });
+              throw new Error(`fff grep error: ${result.error}`);
+            }
+
+            let matches = result.value.items;
+
+            if (args.path) {
+              const target = args.path.replace(/\/+$/, "");
+              matches = matches.filter((m) => m.relativePath === target || m.relativePath.startsWith(target + "/"));
+            }
+
+            if (args.exclude) {
+              const patterns = args.exclude.split(",").map((p) => p.trim()).filter(Boolean);
+              matches = matches.filter((m) => !patterns.some((pat) => minimatch(m.relativePath, pat, { dot: true })));
+            }
+
+            const totalMatches = matches.length;
+            const limit = Math.max(1, args.limit || 1000);
+            const truncated = totalMatches > limit;
+            const returnedMatches = truncated ? matches.slice(0, limit) : matches;
+
+            // Format as traditional grep output: file:line_number:line_content
+            const lines = returnedMatches.map(m => `${m.relativePath}:${m.lineNumber}:${m.lineContent}`);
+            return lines.join('\n');
+          } catch (err) {
+            await client.app.log({ body: { service: "fff-plugin", level: "error", message: `grep EXECUTE EXCEPTION: ${err.message}\n${err.stack}` } });
+            throw err;
           }
-          if (context.abort.aborted) throw new Error("Aborted");
-
-          const opts = {
-            smartCase: args.caseSensitive !== true,
-            beforeContext: args.context ?? 0,
-            afterContext: args.context ?? 0,
-            maxMatchesPerFile: args.limit ? Math.min(args.limit, 500) : 100,
-          };
-
-          const result = finder.grep(args.pattern, opts);
-          if (!result.ok) throw new Error(`fff grep error: ${result.error}`);
-
-          let matches = result.value.items;
-
-          if (args.path) {
-            const target = args.path.replace(/\/+$/, "");
-            matches = matches.filter((m) => m.relativePath === target || m.relativePath.startsWith(target + "/"));
-          }
-
-          if (args.exclude) {
-            const patterns = args.exclude.split(",").map((p) => p.trim()).filter(Boolean);
-            matches = matches.filter((m) => !patterns.some((pat) => minimatch(m.relativePath, pat, { dot: true })));
-          }
-
-          const totalMatches = matches.length;
-          const limit = Math.max(1, args.limit || 1000);
-          const truncated = totalMatches > limit;
-          const returnedMatches = truncated ? matches.slice(0, limit) : matches;
-
-          context.metadata({
-            totalMatches,
-            returnedMatches: returnedMatches.length,
-            truncated,
-            scanComplete: (await scanPromise.catch(() => undefined)) !== undefined,
-          });
-
-          return returnedMatches.map((m) => ({
-            path: m.relativePath,
-            line_number: m.lineNumber,
-            line: m.lineContent,
-            lines: [m.lineContent],
-            submatches: [],
-          }));
         },
       }),
 
@@ -106,9 +112,10 @@ export const FffPlugin = async ({ directory, client }) => {
         async execute(args, context) {
           if (context.abort.aborted) throw new Error("Aborted");
 
+          let scanCompleted = false;
           try {
             await Promise.race([
-              scanPromise,
+              scanPromise.then(() => { scanCompleted = true; }),
               new Promise((resolve) => setTimeout(resolve, 5000)),
             ]);
           } catch {
