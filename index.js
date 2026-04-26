@@ -38,11 +38,10 @@ async function safeLog(client, level, message) {
  */
 async function waitForScan(scanPromise, timeoutMs) {
   try {
-    await Promise.race([
+    return await Promise.race([
       scanPromise.then(() => true),
       new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs)),
     ]);
-    return true;
   } catch {
     return false;
   }
@@ -69,7 +68,6 @@ export const FffPlugin = async ({ directory, client }) => {
       basePath: directory,
       aiMode: true,
       disableMmapCache: true,
-      disableContentIndexing: true,
     });
     if (!initResult.ok) {
       await safeLog(client, "error", `fff init failed: ${initResult.error}`);
@@ -78,10 +76,7 @@ export const FffPlugin = async ({ directory, client }) => {
 
     const finder = initResult.value;
     const scanPromise = finder.waitForScan(SCAN_TIMEOUT_MS).catch(() => undefined);
-    scanPromise.then(
-      () => safeLog(client, "info", "Initial fff scan complete"),
-      () => {}, // Already caught above, but guard against edge cases
-    );
+    scanPromise.then(() => safeLog(client, "info", "Initial fff scan complete"));
 
     instances.set(directory, { finder, scanPromise });
   }
