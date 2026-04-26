@@ -38,13 +38,16 @@ OpenCode tool call → FffPlugin.execute() → fff FileFinder → Format result 
 - `finder.waitForScan(15000)` - Waits for initial index build (15s timeout)
 - `finder.grep(pattern, opts)` - Content search with smart case, context, limits
 - `finder.fileSearch(pattern, { pageSize })` - Fuzzy file search
-- `finder.dirSearch(pattern, { pageSize })` - Fuzzy directory search
+- `finder.directorySearch(pattern, { pageSize })` - Fuzzy directory search
 
 ## Essential Commands
 
 ### Testing
 
 ```bash
+# Run the automated test suite (node:test, zero dependencies)
+node --test test/index.test.js
+
 # Test plugin loads correctly
 node -e "import('./index.js').then(m => console.log('Plugin loads OK'))"
 
@@ -226,11 +229,13 @@ if (context.abort.aborted) throw new Error("Aborted");
 The `caseSensitive` parameter has non-obvious behavior:
 
 ```javascript
+const userLimit = args.limit || DEFAULT_GREP_LIMIT;
 const opts = {
+  mode: "regex",
   smartCase: args.caseSensitive !== true,  // Default is smart case (true) unless explicitly false
   beforeContext: args.context ?? 0,
   afterContext: args.context ?? 0,
-  maxMatchesPerFile: args.limit ? Math.min(args.limit, 500) : 100,
+  maxMatchesPerFile: Math.min(userLimit, DEFAULT_MAX_MATCHES_PER_FILE),  // 100
 };
 ```
 
@@ -264,16 +269,18 @@ if (args.exclude) {
 
 ### Limit Validation
 
-Always validate limits to prevent negative/zero values:
+Always validate limits to prevent negative/zero values. Use `!= null` to catch `0`:
 
 ```javascript
-// For grep limit
-const limit = Math.max(1, args.limit || 1000);
+// Validation (throws on 0, negative, or > MAX_LIMIT)
+if (args.limit != null && (typeof args.limit !== "number" || args.limit < 1 || args.limit > MAX_LIMIT)) {
+  throw new Error(`limit must be a number between 1 and ${MAX_LIMIT}`);
+}
 
-// For glob pageSize
-const pageSize = Math.max(1, args.limit || 100);
+// Apply validated limit with fallback default
+const limit = Math.max(1, args.limit || DEFAULT_GREP_LIMIT);
+const pageSize = Math.max(1, args.limit || DEFAULT_GLOB_LIMIT);
 ```
-
 ### fff API Result Handling
 
 All fff API calls return a Result type with `ok` boolean:
@@ -329,28 +336,36 @@ The `@ff-labs/fff-node` package downloads platform-specific binaries automatical
 - Global: `~/.config/opencode/plugins/` (Linux/macOS) or `%APPDATA%\opencode\plugins\` (Windows)
 - Project-local: `.opencode/plugins/` (any OS)
 
-## Testing Approach
 
-Currently no automated tests. Manual testing:
+## Testing
 
-1. Load plugin in OpenCode
-2. Run search commands via `opencode run "..."` CLI
-3. Verify results are fast and accurate
-4. Check logs: `opencode debug config --print-logs 2>&1 | grep fff`
+Automated test suite in `test/index.test.js` using `node:test` (zero external dependencies, Node.js 18+).
 
-**Recommended test cases** (if adding automated tests):
-- grep with simple pattern returns matches
-- grep with `caseSensitive: true` respects case
-- grep with `path` filter narrows results
-- grep with `exclude` filters correctly
-- grep with `context` returns before/after lines
-- grep with `limit` truncates results
-- glob with pattern returns file paths
-- glob with `type: "directory"` returns only directories
-- glob with `path` filter narrows results
-- glob with `limit` truncates results
-- Abort handling doesn't crash plugin
-- Scan timeout doesn't crash plugin
+```bash
+node --test test/index.test.js
+```
+
+The suite covers 69 tests across 18 suites:
+
+| Suite | Tests | What's verified |
+|-------|-------|-----------------|
+| Initialization | 7 | Plugin export shape, PluginInput compat, bad directory error, instance caching, logging, broken log survival |
+| Tool definition shape | 6 | OpenCode SDK contract, parameter names match built-in grep/glob, return type is `string` |
+| grep basic | 7 | Pattern matching, `file:line:content` format, relative paths, empty results, input validation |
+| grep case sensitivity | 5 | Smart case default, uppercase auto-enables case-sensitive, `caseSensitive=true/false` |
+| grep path filtering | 5 | Subdirectory scope, trailing slash normalization, nested paths |
+| grep exclude | 4 | Single glob, comma-separated, whitespace trimming, hidden files |
+| grep context | 2 | Context lines before/after match |
+| grep limit | 6 | Limit enforcement, edge cases (0, negative, >5000) |
+| grep input validation | 3 | Negative context, non-number types |
+| grep abort | 1 | Pre-aborted signal |
+| grep regex | 2 | Valid regex, invalid regex graceful fallback |
+| glob basic | 6 | Fuzzy file search, newline paths, empty results, input validation |
+| glob type filter | 3 | Default (file), type=directory, invalid type coercion |
+| glob path/limit/abort | 4 | Path filtering, trailing slash, limit, abort |
+| Edge cases | 8 | Special regex chars, long pattern, combined params, extra args, concurrent calls |
+
+Tests create a temporary project directory with sample files, initialize a real `FileFinder` instance, and poll until the scan completes before running assertions.
 
 ## Common Gotchas
 
@@ -360,7 +375,7 @@ Currently no automated tests. Manual testing:
 
 3. **Path trailing slashes**: Always use `.replace(/\/+$/, "")` before filtering to handle both "src" and "src/" inputs.
 
-4. **Limit validation**: Use `Math.max(1, args.limit || default)` to prevent zero/negative limits passed to fff.
+4. **Limit validation**: Validate with `args.limit != null &&` (not `args.limit &&`) to catch `limit: 0`. Then apply with `Math.max(1, args.limit || default)`.
 
 5. **Abort checking**: Check `context.abort.aborted` both at start AND after any async operation.
 
@@ -389,6 +404,8 @@ Currently no automated tests. Manual testing:
 opencode-fff-search-plugin/
 ├── index.js          # Single plugin file (ES module)
 ├── package.json      # NPM package configuration
+├── test/
+│   └── index.test.js # Automated test suite (node:test)
 ├── install.sh        # Installation script (Linux/macOS only)
 ├── README.md         # User documentation
 ├── CODE_REVIEW.md    # Code review notes (historical)
@@ -403,13 +420,14 @@ Only `index.js` is included in the published npm package (see `package.json` `fi
 
 When modifying the plugin:
 
-1. **Test locally**: Link the plugin to your OpenCode config and test with real searches
-2. **Check logs**: `opencode debug config --print-logs 2>&1 | grep fff`
-3. **Verify return format**: Ensure tools return strings, not objects
-4. **Update README**: If changing tool parameters or behavior
-5. **Bump version**: Follow semver in `package.json` (major/minor/patch)
-6. **Create git tag**: `git tag vX.Y.Z` before publishing
-7. **Publish to npm**: `npm publish --access public`
+1. **Run tests**: `node --test test/index.test.js`
+2. **Test locally**: Link the plugin to your OpenCode config and test with real searches
+3. **Check logs**: `opencode debug config --print-logs 2>&1 | grep fff`
+4. **Verify return format**: Ensure tools return strings, not objects
+5. **Update README**: If changing tool parameters or behavior
+6. **Bump version**: Follow semver in `package.json` (major/minor/patch)
+7. **Create git tag**: `git tag vX.Y.Z` before publishing
+8. **Publish to npm**: `npm publish --access public`
 
 ## Performance Characteristics
 

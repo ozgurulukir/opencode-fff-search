@@ -39,10 +39,10 @@ cd "$CONFIG_DIR" || exit 1
 
 if command -v bun &> /dev/null; then
     echo "Using Bun to install dependencies..."
-    bun add @ff-labs/fff-node @opencode-ai/plugin
+    bun add @ff-labs/fff-node
 elif command -v npm &> /dev/null; then
     echo "Using npm to install dependencies..."
-    npm install @ff-labs/fff-node @opencode-ai/plugin
+    npm install @ff-labs/fff-node
 else
     echo "Error: Neither Bun nor npm found. Please install Node.js (https://nodejs.org) or Bun (https://bun.sh)."
     exit 1

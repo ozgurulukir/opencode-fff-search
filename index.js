@@ -100,7 +100,7 @@ export const FffPlugin = async ({ directory, client }) => {
             if (!args.pattern || typeof args.pattern !== "string" || args.pattern.trim() === "") {
               throw new Error("pattern must be a non-empty string");
             }
-            if (args.limit && (typeof args.limit !== "number" || args.limit < 1 || args.limit > MAX_LIMIT)) {
+            if (args.limit != null && (typeof args.limit !== "number" || args.limit < 1 || args.limit > MAX_LIMIT)) {
               throw new Error(`limit must be a number between 1 and ${MAX_LIMIT}`);
             }
             if (args.context && (typeof args.context !== "number" || args.context < 0)) {
@@ -170,7 +170,7 @@ export const FffPlugin = async ({ directory, client }) => {
             if (!args.pattern || typeof args.pattern !== "string" || args.pattern.trim() === "") {
               throw new Error("pattern must be a non-empty string");
             }
-            if (args.limit && (typeof args.limit !== "number" || args.limit < 1 || args.limit > MAX_LIMIT)) {
+            if (args.limit != null && (typeof args.limit !== "number" || args.limit < 1 || args.limit > MAX_LIMIT)) {
               throw new Error(`limit must be a number between 1 and ${MAX_LIMIT}`);
             }
 
@@ -183,7 +183,7 @@ export const FffPlugin = async ({ directory, client }) => {
             let items;
 
             if (args.type === "directory") {
-              const dirResult = finder.dirSearch(args.pattern, { pageSize });
+              const dirResult = finder.directorySearch(args.pattern, { pageSize });
               if (!dirResult.ok) throw new Error(`fff dirSearch error: ${dirResult.error}`);
               items = dirResult.value?.items;
             } else {

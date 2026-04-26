@@ -115,6 +115,7 @@ bus error when any mapped file is truncated or deleted during a session (editor 
 git operations, builds). Standard file I/O is used instead, with negligible
 performance impact for agent workloads where the index scan dominates latency.
 See [fff.nvim#294](https://github.com/dmtrKovalenko/fff.nvim/issues/294).
+
 ## Tool Parameters
 
 ### `grep` Tool
@@ -249,6 +250,9 @@ git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search
 npm install
 
+# Run the automated test suite
+node --test test/index.test.js
+
 # Test the plugin loads correctly
 node -e "import('./index.js').then(m => console.log('Plugin loads OK'))"
 
@@ -269,13 +273,13 @@ MIT - see [LICENSE](LICENSE) file.
 - [OpenCode](https://github.com/anomalyco/opencode) - AI coding agent
 
 ## Contributing
-
 PRs welcome! Please:
 
-1. Test with a real OpenCode session
-2. Include benchmark results if optimizing performance
-3. Follow existing code style (no semicolons, 2-space indent)
-4. Update README if changing behavior
+1. Run the test suite: `node --test test/index.test.js`
+2. Test with a real OpenCode session
+3. Include benchmark results if optimizing performance
+4. Follow existing code style (no semicolons, 2-space indent)
+5. Update README if changing behavior
 
 ## Related
 
