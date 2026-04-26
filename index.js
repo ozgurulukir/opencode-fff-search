@@ -56,8 +56,8 @@ function normalizePath(path) {
   return path.replace(TRAILING_SLASH_RE, "");
 }
 
-// Module-level instance cache to prevent leaking background watcher threads
-// which use mmap and can cause SIGBUS crashes if multiple are running.
+// Module-level instance cache to prevent leaking native resources (watcher threads,
+// mmap handles). Only one FileFinder per directory is allowed.
 const instances = new Map();
 
 export const FffPlugin = async ({ directory, client }) => {
@@ -68,6 +68,7 @@ export const FffPlugin = async ({ directory, client }) => {
       basePath: directory,
       aiMode: true,
       disableMmapCache: true,
+      disableWatch: false,
     });
     if (!initResult.ok) {
       await safeLog(client, "error", `fff init failed: ${initResult.error}`);

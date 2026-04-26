@@ -174,6 +174,34 @@ await client.app.log({
 - Warnings about timeouts (warn)
 
 ## Critical Implementation Details
+## SIGBUS Prevention
+
+The plugin disables mmap caching in `FileFinder.create()`:
+
+```javascript
+const initResult = FileFinder.create({
+  basePath: directory,
+  aiMode: true,
+  disableMmapCache: true,  // Prevents SIGBUS on file truncation
+  disableWatch: false,       // Watcher ON: new/deleted files appear in search
+});
+```
+
+**Why mmap is disabled**: fff maps indexed files into memory via `mmap()`. If any
+process truncates or deletes a mapped file, reading it triggers SIGBUS (unrecoverable).
+OpenCode's agent workload constantly mutates files (edits, git ops, session writes). Standard
+`read()` syscalls are used instead — performance impact is negligible.
+
+**Why watch is enabled**: The file watcher detects new and deleted files within ~2 seconds.
+Without it, files created during a session (agent creates new files, npm install) never
+appear in search results. With `disableMmapCache: true`, the watcher is safe — the SIGBUS
+risk only materializes when mmap cache is also enabled.
+
+**Known issue**: `finder.destroy()` blocks indefinitely when the watcher is active (native
+thread join). This is a fff-node bug but doesn't affect normal operation since the plugin
+never destroys the finder mid-session.
+
+See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md) for full root cause analysis.
 
 ### Tool Return Format
 
@@ -339,13 +367,17 @@ The `@ff-labs/fff-node` package downloads platform-specific binaries automatical
 
 ## Testing
 
-Automated test suite in `test/index.test.js` using `node:test` (zero external dependencies, Node.js 18+).
+Automated test suite using `node:test` (zero external dependencies, Node.js 18+).
+
+### Core tests
 
 ```bash
 node --test test/index.test.js
 ```
 
-The suite covers 69 tests across 18 suites:
+78 unit tests across 23 suites covering initialization, tool shape, grep/glob behavior,
+case sensitivity, path filtering, exclude patterns, limits, abort handling, regex, and
+edge cases.
 
 | Suite | Tests | What's verified |
 |-------|-------|-----------------|
@@ -365,7 +397,86 @@ The suite covers 69 tests across 18 suites:
 | glob path/limit/abort | 4 | Path filtering, trailing slash, limit, abort |
 | Edge cases | 8 | Special regex chars, long pattern, combined params, extra args, concurrent calls |
 
-Tests create a temporary project directory with sample files, initialize a real `FileFinder` instance, and poll until the scan completes before running assertions.
+### Session simulation tests (synthetic 270-file project)
+
+```bash
+node --test test/session-*.js
+```
+
+7 tests simulating real OpenCode agent behavior on a synthetic project:
+- Interleaved edits + searches (200 cycles)
+- File renames during in-flight searches (50 searches + 25 renames)
+- Session DB truncate+rewrite (200 cycles)
+- Git index rewrite (100 cycles)
+- npm install/uninstall (50 creates + 25 removes)
+- Full 500-cycle agent session (grep + glob + edits + creates + deletes + renames + DB writes)
+- 5 concurrent finders + 50 concurrent mutations
+
+### Integration tests (requires `opencode` CLI)
+
+```bash
+node --test test/integration-*.js
+```
+
+4 tests spawning actual `opencode run` processes:
+- Async I/O mutations on synthetic project (200 mutations)
+- Worker-thread mutations on synthetic project (500 mutations)
+- Async I/O mutations on real nodejs/node repo (1000 mutations)
+- Worker-thread mutations on real nodejs/node repo (2000 mutations)
+
+### Multi-session test
+
+```bash
+NUM_SESSIONS=6 node --test test/integration-multi-session.js
+```
+
+Spawns 4-6 concurrent `opencode run` instances with different prompts while
+3000 files are mutated simultaneously. Configurable via `NUM_SESSIONS` env var.
+
+### Watch-enabled tests (mmap OFF, watch ON)
+
+```bash
+node --test test/stress-watch-enabled.js       # Stability tests (~40s)
+node --test test/stress-watch-timing.js         # Debounce timing (~12s)
+node --test test/stress-watch-real-repo.js    # Real repo (48K files, ~55s)
+```
+
+Verifies the file watcher works correctly with mmap disabled:
+- New files appear in search within ~1s on real repos
+- Deleted files are removed from results within ~1s
+- No SIGBUS, no hangs at moderate mutation rates
+- Search latency unchanged (6ms avg grep on 48K files)
+
+### Multi-session watch test
+
+```bash
+NUM_SESSIONS=6 node --test test/integration-multi-session-watch.js
+```
+
+Concurrent opencode sessions + watch-enabled FileFinder + 3000 mutations on real repo.
+Tests watcher stability under real multi-process contention. Results: 0 SIGBUS across
+4-6 sessions with 98% watcher detection rate at 4 sessions, 50% at 6 sessions.
+
+
+### Mmap cache tests (proves the crash)
+
+```bash
+node --test test/stress-mmap-enabled.js   # WARNING: will SIGBUS
+node --test test/stress-mmap-single.js    # WARNING: will SIGBUS on real repo
+```
+
+These tests intentionally enable `disableMmapCache: false` to demonstrate the
+SIGBUS crash. They will kill the test process. See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md).
+
+### Real repo tests
+
+Integration tests that use the nodejs/node repository require:
+
+```bash
+git clone --depth=1 https://github.com/nodejs/node.git /tmp/stress-test-repos/nodejs
+```
+
+Some tests also accept `NODEJS_REPO` env var to point to a different repo.
 
 ## Common Gotchas
 
@@ -388,6 +499,9 @@ Tests create a temporary project directory with sample files, initialize a real 
 9. **aiMode setting**: `FileFinder.create({ basePath: directory, aiMode: true })` enables AI-optimized ranking. Don't change this without understanding fff's AI mode.
 
 10. **Result indexing**: `result.value.items` contains matches/items, not the result object itself. Always check `result.ok` first.
+11. **disableMmapCache**: Always use `disableMmapCache: true`. mmap maps files into memory; any truncation/delete causes SIGBUS. Standard read() is used instead.
+
+12. **disableWatch**: Set to `false` (watcher enabled). Watcher detects new/deleted files within ~2s. Only safe when `disableMmapCache: true` — do NOT combine with mmap cache ON.
 
 ## Dependencies
 
@@ -396,19 +510,37 @@ Tests create a temporary project directory with sample files, initialize a real 
 - `minimatch` ^9.0.0 - Glob pattern matching for `exclude` parameter
 
 ### Peer Dependencies
-- `@opencode-ai/plugin` >=1.14.0 - OpenCode plugin SDK (provided by OpenCode runtime)
-
-## Package Structure
-
-```
+``
 opencode-fff-search-plugin/
 ├── index.js          # Single plugin file (ES module)
 ├── package.json      # NPM package configuration
 ├── test/
-│   └── index.test.js # Automated test suite (node:test)
+│   ├── helpers/
+│   │   └── stress.js                  # Shared helpers: project structure, finder init
+│   ├── index.test.js                  # 78 core unit tests
+│   ├── session-edit.js                # Edit+search stress test
+│   ├── session-refactor.js            # Rename during search stress test
+│   ├── session-db.js                  # Session DB stress test
+│   ├── session-git.js                 # Git index stress test
+│   ├── session-nodemodules.js         # npm install/remove stress test
+│   ├── session-heavy.js               # Full agent cycle stress test
+│   ├── session-concurrent.js          # Concurrent finder stress test
+│   ├── integration-opencode.js        # Live opencode + async mutations
+│   ├── integration-worker.js          # Live opencode + worker mutations
+│   ├── integration-real-repo.js       # Live opencode + real repo mutations
+│   ├── integration-worker-real.js     # Live opencode + worker + real repo
+│   ├── integration-multi-session.js   # Concurrent opencode instances
+│   ├── integration-multi-session-watch.js # Concurrent sessions + watch ON + mutations
+│   ├── stress-mmap-enabled.js         # mmap crash demo (will SIGBUS)
+│   ├── stress-mmap-single.js          # Single-instance mmap crash demo
+│   ├── stress-watch-enabled.js         # Watch ON + mmap OFF stability tests
+│   ├── stress-watch-real-repo.js        # Watch ON + mmap OFF on real repo (48K files)
+│   ├── stress-watch-timing.js           # Watcher debounce timing measurement
+│   ├── diagnose-mmap.js               # Isolated mmap diagnostic
+│   ├── mutation-worker.cjs            # CJS worker for synthetic mutations
+│   └── mutation-worker-real.cjs       # CJS worker for real repo mutations
 ├── install.sh        # Installation script (Linux/macOS only)
-├── README.md         # User documentation
-├── CODE_REVIEW.md    # Code review notes (historical)
+├── SIGBUS_INVESTIGATION.md  # SIGBUS root cause analysis
 ├── PUBLISHING.md     # Publishing instructions
 ├── LICENSE           # MIT License
 └── AGENTS.md         # This file
@@ -420,14 +552,15 @@ Only `index.js` is included in the published npm package (see `package.json` `fi
 
 When modifying the plugin:
 
-1. **Run tests**: `node --test test/index.test.js`
-2. **Test locally**: Link the plugin to your OpenCode config and test with real searches
-3. **Check logs**: `opencode debug config --print-logs 2>&1 | grep fff`
-4. **Verify return format**: Ensure tools return strings, not objects
-5. **Update README**: If changing tool parameters or behavior
-6. **Bump version**: Follow semver in `package.json` (major/minor/patch)
-7. **Create git tag**: `git tag vX.Y.Z` before publishing
-8. **Publish to npm**: `npm publish --access public`
+1. **Run core tests**: `node --test test/index.test.js`
+2. **Run session tests**: `node --test test/session-*.js`
+3. **Test locally**: Link the plugin to your OpenCode config and test with real searches
+4. **Check logs**: `opencode debug config --print-logs 2>&1 | grep fff`
+5. **Verify return format**: Ensure tools return strings, not objects
+6. **Update README**: If changing tool parameters or behavior
+7. **Bump version**: Follow semver in `package.json` (major/minor/patch)
+8. **Create git tag**: `git tag vX.Y.Z` before publishing
+9. **Publish to npm**: `npm publish --access public`
 
 ## Performance Characteristics
 
@@ -435,5 +568,7 @@ When modifying the plugin:
 - **Subsequent searches**: <10ms (in-memory index)
 - **Scan timeout**: 15s absolute limit for `waitForScan`, 5s practical limit in tools
 - **Result limits**: Grep defaults to 1000 matches, glob defaults to 100 results
+- **mmap cache**: Disabled (`disableMmapCache: true`) for stability — prevents SIGBUS on file truncation
+- **File watcher**: Enabled (`disableWatch: false`) — new/deleted files appear in search within ~2s
 
 The shared `scanPromise` pattern is critical—without it, concurrent tool calls would trigger multiple scans, causing severe performance degradation.

@@ -114,7 +114,8 @@ fff's mmap warmup maps all indexed files into memory, which causes an unrecovera
 bus error when any mapped file is truncated or deleted during a session (editor saves,
 git operations, builds). Standard file I/O is used instead, with negligible
 performance impact for agent workloads where the index scan dominates latency.
-See [fff.nvim#294](https://github.com/dmtrKovalenko/fff.nvim/issues/294).
+The file watcher is enabled — new and deleted files appear in search results within ~2s.
+See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md) for full root cause analysis.
 
 ## Tool Parameters
 
@@ -188,9 +189,9 @@ On a Chromium-sized repo (500k files):
 | Single search | 3-9s | <10ms |
 | 100 searches | 5-15min | <1s |
 
-Mmap caching is disabled for stability (see above). This adds a small
-constant overhead per grep call but does not affect index scan time or
-file/directory search speed.
+Mmap caching is disabled for stability (see above). The file watcher is enabled —
+new and deleted files appear in search within ~1s. On a 48K-file repo, search latency
+averages 6ms (grep) and 6.5ms (glob) with the watcher active.
 
 [Read the full fff.nvim performance analysis](https://github.com/dmtrKovalenko/fff.nvim#what-is-fff-and-why-use-it-over-ripgrep-or-fzf)
 
@@ -243,6 +244,12 @@ The first search triggers index building (typically 500ms-2s depending on repo s
 - On Linux/macOS: check file permissions
 - On Windows: run terminal as admin if accessing protected directories
 
+### SIGBUS crashes (signal 7)
+The plugin disables mmap caching and file watching to prevent SIGBUS. If you see SIGBUS:
+- Ensure you're running v0.2.7+ (which includes `disableMmapCache: true` and `disableWatch: true`)
+- Check `node -e "import('./index.js')"` to verify the plugin loads the latest version
+- See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md) for root cause details
+
 ## Development
 
 ```bash
@@ -250,20 +257,17 @@ git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search
 npm install
 
-# Run the automated test suite
+# Run the automated test suite (78 core unit tests)
 node --test test/index.test.js
+
+# Run session simulation tests (synthetic project stress tests)
+node --test test/session-*.js
+
+# Run integration tests (requires opencode CLI + plugin symlinked)
+node --test test/integration-*.js
 
 # Test the plugin loads correctly
 node -e "import('./index.js').then(m => console.log('Plugin loads OK'))"
-
-# Link for local development (global)
-ln -sf $(pwd)/index.js ~/.config/opencode/plugins/opencode-fff-search.js
-
-# Or on Windows (PowerShell):
-# New-Item -ItemType SymbolicLink -Path "$env:APPDATA\opencode\plugins\opencode-fff-search.js" -Value "$(Get-Location)\index.js"
-```
-
-## License
 
 MIT - see [LICENSE](LICENSE) file.
 
@@ -276,10 +280,11 @@ MIT - see [LICENSE](LICENSE) file.
 PRs welcome! Please:
 
 1. Run the test suite: `node --test test/index.test.js`
-2. Test with a real OpenCode session
-3. Include benchmark results if optimizing performance
-4. Follow existing code style (no semicolons, 2-space indent)
-5. Update README if changing behavior
+2. Run session stress tests: `node --test test/session-*.js`
+3. Test with a real OpenCode session
+4. Include benchmark results if optimizing performance
+5. Follow existing code style (no semicolons, 2-space indent)
+6. Update README if changing behavior
 
 ## Related
 
