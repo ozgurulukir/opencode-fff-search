@@ -108,7 +108,7 @@ export default async (input) => {
       aiMode: false,           // Disable frecency DB (mmap source)
       disableMmapCache: true,  // Disable file cache (mmap source)
       disableContentIndexing: true, // Explicitly disable content index (mmap source)
-      disableWatch: false,     // Watcher is stable with mmap OFF
+      disableWatch: true,      // Disabled due to upstream stack overflow bug (fff.nvim#422)
     });
     if (!initResult.ok) {
       await safeLog(client, "error", `fff init failed: ${initResult.error}`);
