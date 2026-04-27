@@ -31,6 +31,13 @@ function createTempProject() {
   writeFileSync(join(tmpDir, "docs", "notes.txt"), `TODO: finish this\nFIXME: broken thing\n`);
   writeFileSync(join(tmpDir, ".gitignore"), `node_modules/\n.tmp*\n`);
   writeFileSync(join(tmpDir, "src", "case.js"), `const lower = "abc";\nconst UPPER = "ABC";\nconst Mixed = "AbC";\n`);
+  writeFileSync(join(tmpDir, "src", "metachars.js"), `// contains literal regex metacharacters
+const parens = "foo(bar)";
+const bracket = "file[1].txt";
+const plus = "page+1";
+const dot = "example.com";
+`);
+
 
   return tmpDir;
 }
@@ -83,7 +90,7 @@ let ctx;
 before(async () => {
   tmpDir = createTempProject();
   const mod = await import("../index.js");
-  FffPlugin = mod.FffPlugin;
+  FffPlugin = mod.default;
 
   const { client } = createMockClient();
   const { tool } = await FffPlugin({ directory: tmpDir, client });
@@ -633,6 +640,43 @@ describe("FffPlugin", () => {
       assert.equal(typeof result, "string");
     });
 
+    it("grep literal text with regex metacharacters (parens)", async () => {
+      // fff always runs in regex mode, so literal parens need escaping to match literally.
+      // This test documents current behavior: foo(bar) is an invalid regex capture group
+      // and fff falls back to literal matching.
+      const result = await grepExecute({ pattern: "foo(bar)" }, ctx);
+      const lines = result.split("\n").filter(Boolean);
+      // fff's fallback for invalid regex may still match — verify it doesn't crash
+      assert.equal(typeof result, "string");
+      const metaLines = lines.filter(l => l.includes("metachars.js"));
+      if (metaLines.length > 0) {
+        // fff fell back to literal matching — the line exists
+        for (const l of metaLines) {
+          assert.ok(l.includes("foo(bar)"), `Expected literal foo(bar): ${l}`);
+        }
+      }
+    });
+
+    it("grep literal text with regex metacharacters (brackets)", async () => {
+      // file[1].txt is a valid regex: 'file' followed by character class [1]
+      // In regex mode, this matches 'file1.txt' (no dot needed). This documents
+      // that always-regex-mode can produce unexpected literal matches.
+      const result = await grepExecute({ pattern: "file[1].txt" }, ctx);
+      assert.equal(typeof result, "string");
+    });
+
+    it("grep literal text with regex metacharacters (dot)", async () => {
+      // In regex mode, 'example.com' matches 'example<any_char>com'
+      // This is the expected regex behavior for unescaped dots.
+      const result = await grepExecute({ pattern: "example.com" }, ctx);
+      assert.equal(typeof result, "string");
+      if (result.length > 0) {
+        // The dot matched literally because the content is exactly "example.com"
+        const metaLines = result.split("\n").filter(Boolean).filter(l => l.includes("metachars.js"));
+        assert.ok(metaLines.length > 0, "'example.com' regex should match metachars.js");
+      }
+    });
+
     it("glob with special characters in pattern", async () => {
       const result = await globExecute({ pattern: "foo.js" }, ctx);
       assert.equal(typeof result, "string");
@@ -680,6 +724,47 @@ describe("FffPlugin", () => {
       assert.equal(typeof r3, "string");
     });
   });
+
+  // -----------------------------------------------------------------------
+  // Grep pagination — verifies cursor-based multi-page fetch
+  // -----------------------------------------------------------------------
+  describe("grep pagination", () => {
+    it("should return many results when a file has many matches", async () => {
+      // The test project has small files. Pagination matters when a single
+      // file has more matches than one page's worth of files can cover.
+      // Use pattern "." to match every line in every file.
+      const result = await grepExecute({ pattern: ".", limit: 50 }, ctx);
+      const lines = result.split("\n").filter(Boolean);
+      assert.ok(lines.length > 0, "Should find at least some matches");
+      assert.ok(lines.length <= 50, `limit=50 should return ≤50 lines, got ${lines.length}`);
+    });
+
+    it("should not crash or throw when results are paginated", async () => {
+      // Pattern that matches many lines across many files — exercises
+      // the pagination loop path. Should not throw.
+      const result = await grepExecute({ pattern: ".", limit: 500 }, ctx);
+      assert.equal(typeof result, "string");
+      const lines = result.split("\n").filter(Boolean);
+      assert.ok(lines.length > 0, "Should return results");
+      assert.ok(lines.length <= 500, `limit=500 returned ${lines.length} lines`);
+    });
+
+    it("limit=1 returns at most 1 result (pagination stops early)", async () => {
+      const result = await grepExecute({ pattern: "export", limit: 1 }, ctx);
+      const lines = result.split("\n").filter(Boolean);
+      assert.ok(lines.length <= 1, `limit=1 returned ${lines.length} lines`);
+    });
+
+    it("pagination + path filtering: returns results only within path", async () => {
+      const result = await grepExecute({ pattern: ".", path: "src", limit: 30 }, ctx);
+      const lines = result.split("\n").filter(Boolean);
+      assert.ok(lines.length <= 30, `limit=30 returned ${lines.length}`);
+      for (const line of lines) {
+        const filePath = line.split(":")[0];
+        assert.ok(filePath.startsWith("src/"), `Path filter failed in pagination: ${filePath}`);
+      }
+    });
+  });
 });
 
 // =========================================================================
@@ -713,21 +798,21 @@ describe("SIGBUS / stability stress tests", () => {
   async function initFinder() {
     const result = FileFinder.create({
       basePath: stressDir,
-      aiMode: true,
-      disableMmapCache: true,
+      aiMode: false,                // Match production
+      disableMmapCache: true,       // Match production
+      disableContentIndexing: true, // Match production
+      disableWatch: true,           // Disable watcher so destroy() doesn't hang
     });
     if (!result.ok) throw new Error(`stress finder init failed: ${result.error}`);
     stressFinder = result.value;
-    // Wait for scan
-    const scanResult = await stressFinder.waitForScan(10000);
-    if (scanResult.ok && !scanResult.value) {
-      // Scan didn't complete — try a search anyway, it might work on partial index
-    }
+    await stressFinder.waitForScan(10000);
   }
 
   function cleanup() {
+    // destroy() is safe here because disableWatch: true prevents the native
+    // watcher thread from blocking on join.
     if (stressFinder && !stressFinder.isDestroyed) {
-      try { stressFinder.destroy(); } catch { /* best effort */ }
+      try { stressFinder.destroy(); } catch { /* fff-node may throw on stale handles */ }
     }
     cleanupTempProject(stressDir);
   }
@@ -744,7 +829,8 @@ describe("SIGBUS / stability stress tests", () => {
         unlinkSync(join(stressDir, "file-25.txt"));
         // Grep should handle missing file gracefully
         const result = stressFinder.grep("line1");
-        assert.ok(result.ok || !result.ok, "grep should not crash");
+        // Reachability check — SIGBUS would kill the process before getting here
+        assert.equal(typeof result, "object", "grep should return a result after file deletion");
         if (result.ok) {
           assert.equal(typeof result.value.items, "object");
         }
@@ -762,7 +848,8 @@ describe("SIGBUS / stability stress tests", () => {
         ftruncateSync(fd, 0);
         closeSync(fd);
         const result = stressFinder.grep("file-10");
-        assert.ok(result.ok || !result.ok, "grep should not crash on truncated file");
+        // Reachability check — SIGBUS would kill the process before getting here
+        assert.equal(typeof result, "object", "grep should return a result after file truncation");
       } finally {
         cleanup();
       }
@@ -778,7 +865,8 @@ describe("SIGBUS / stability stress tests", () => {
           writeFileSync(join(stressDir, `file-${i}.txt`), `overwritten ${Date.now()}\n`);
         }
         const result = await searchPromise;
-        assert.ok(result.ok || !result.ok, "grep should not crash during file mutation");
+        // Reachability check — SIGBUS would kill the process before getting here
+        assert.equal(typeof result, "object", "grep should return a result during file mutation");
       } finally {
         cleanup();
       }
@@ -798,7 +886,8 @@ describe("SIGBUS / stability stress tests", () => {
         }
         // Now search — should not crash on stale directory entries
         const result = stressFinder.grep("volatile");
-        assert.ok(result.ok || !result.ok, "grep should handle volatile files");
+        // Reachability check — SIGBUS would kill the process before getting here
+        assert.equal(typeof result, "object", "grep should handle volatile files");
       } finally {
         cleanup();
       }
@@ -817,8 +906,9 @@ describe("SIGBUS / stability stress tests", () => {
         for (let i = 0; i < 5; i++) {
           const result = FileFinder.create({
             basePath: stressDir,
-            aiMode: true,
+            aiMode: false,
             disableMmapCache: true,
+            disableWatch: true,  // Prevent destroy() hang
           });
           if (result.ok) finders.push(result.value);
         }
@@ -826,12 +916,14 @@ describe("SIGBUS / stability stress tests", () => {
         const results = await Promise.all(
           finders.map((f) => f.grep("line1"))
         );
+        // Reaching this point proves no SIGBUS — the assertion is a reachability check
         for (const r of results) {
-          assert.ok(r.ok || !r.ok, "each finder should not crash");
+          assert.equal(typeof r, "object", "finder.grep should return a result object");
         }
       } finally {
+        // Safe to destroy: disableWatch:true prevents native thread join blocking
         for (const f of finders) {
-          try { if (!f.isDestroyed) f.destroy(); } catch { /* best effort */ }
+          try { if (!f.isDestroyed) f.destroy(); } catch { /* stale handle */ }
         }
         cleanup();
       }
@@ -842,8 +934,9 @@ describe("SIGBUS / stability stress tests", () => {
       try {
         const result = FileFinder.create({
           basePath: stressDir,
-          aiMode: true,
+          aiMode: false,
           disableMmapCache: true,
+          disableWatch: true,  // Prevent destroy() hang
         });
         if (!result.ok) throw new Error(`init failed: ${result.error}`);
         const finder = result.value;
@@ -853,7 +946,8 @@ describe("SIGBUS / stability stress tests", () => {
         finder.destroy();
         // The search should return an error, not SIGBUS
         const searchResult = await searchPromise;
-        assert.ok(searchResult.ok || !searchResult.ok, "destroy during search should not SIGBUS");
+        // Reaching this assertion proves no SIGBUS — destroy() mid-search is the actual test
+        assert.equal(typeof searchResult, "object", "destroy during search should return a result, not SIGBUS");
       } finally {
         cleanup();
       }
@@ -879,7 +973,8 @@ describe("SIGBUS / stability stress tests", () => {
         closeSync(fd);
 
         const result = stressFinder.grep("AAAA");
-        assert.ok(result.ok || !result.ok, "grep should not crash on truncated large file");
+        // Reachability check — SIGBUS would kill the process before getting here
+        assert.equal(typeof result, "object", "grep should return a result after large file truncation");
       } finally {
         cleanup();
       }

@@ -92,9 +92,10 @@ describe(`integration: ${NUM_SESSIONS} concurrent opencode sessions + watch ON +
     // Init a watch-enabled FileFinder to monitor new file detection during mutations
     const initResult = FileFinder.create({
       basePath: repoDir,
-      aiMode: true,
-      disableMmapCache: true,
-      disableWatch: false,
+      aiMode: false,           // Match production
+      disableMmapCache: true,  // Match production
+      disableContentIndexing: true, // Match production
+      disableWatch: false,     // Match production
     });
     if (!initResult.ok) throw new Error(`watcher init failed: ${initResult.error}`);
     watcher = initResult.value;

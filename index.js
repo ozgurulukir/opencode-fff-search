@@ -6,14 +6,58 @@ import { minimatch } from "minimatch";
 const TRAILING_SLASH_RE = /\/+$/;
 const SCAN_TIMEOUT_MS = 15000;
 const TOOL_TIMEOUT_MS = 5000;
+const GREP_TIME_BUDGET_MS = 15000; // Wall-clock cap per grep call
 const MAX_LIMIT = 5000;
 const DEFAULT_GREP_LIMIT = 1000;
 const DEFAULT_GLOB_LIMIT = 100;
-const DEFAULT_MAX_MATCHES_PER_FILE = 100;
+const MAX_GREP_PAGES = 5; // Max pagination rounds to prevent runaway searches
+
+/**
+ * Shared helper to filter results by relative path.
+ * Handles both exact matches and subdirectory matches.
+ */
+function filterByPath(items, pathKey, targetPath) {
+  if (!targetPath) return items;
+  const target = targetPath.replace(TRAILING_SLASH_RE, "");
+  return items.filter((item) => {
+    const path = item[pathKey];
+    return path === target || path.startsWith(target + "/");
+  });
+}
+/**
+ * Fetch grep results across multiple pages via cursor-based pagination.
+ * fff-node grep() returns results one "page" of files at a time (frecency-ordered).
+ * This helper accumulates items across pages until the target limit is met,
+ * no more results exist, or the page ceiling is reached.
+ *
+ * @param {object} finder - FileFinder instance
+ * @param {string} pattern - Grep pattern
+ * @param {object} baseOpts - GrepOptions (mode, smartCase, beforeContext, afterContext)
+ * @param {number} targetLimit - Desired match count
+ * @param {number} maxPages - Page ceiling (default: MAX_GREP_PAGES)
+ * @returns {Array} Accumulated GrepMatch items
+ */
+async function fetchGrepPages(finder, pattern, baseOpts, targetLimit, maxPages = MAX_GREP_PAGES) {
+  const items = [];
+  let cursor = null;
+  for (let page = 0; page < maxPages; page++) {
+    const opts = { ...baseOpts, cursor, timeBudgetMs: GREP_TIME_BUDGET_MS };
+    const result = finder.grep(pattern, opts);
+    if (!result.ok) break;
+    const pageResult = result.value;
+    if (!Array.isArray(pageResult.items) || pageResult.items.length === 0) break;
+    items.push(...pageResult.items);
+    if (items.length >= targetLimit) break;
+    if (!pageResult.nextCursor) break;
+    cursor = pageResult.nextCursor;
+  }
+  return items;
+}
+
 
 /**
  * FFF Plugin - Replaces OpenCode's default file search (grep, glob)
- * with fff.nvim's fast, typo-resistant, frecency-ranked search.
+ * with fff.nvim's fast, typo-resistant search.
  */
 
 /**
@@ -47,28 +91,24 @@ async function waitForScan(scanPromise, timeoutMs) {
   }
 }
 
-/**
- * Normalize path by removing trailing slashes.
- * @param {string} path - The path to normalize
- * @returns {string} - Normalized path without trailing slashes
- */
-function normalizePath(path) {
-  return path.replace(TRAILING_SLASH_RE, "");
-}
-
 // Module-level instance cache to prevent leaking native resources (watcher threads,
 // mmap handles). Only one FileFinder per directory is allowed.
 const instances = new Map();
 
-export const FffPlugin = async ({ directory, client }) => {
+/**
+ * Main plugin entry point - aligned with @opencode-ai/plugin SDK
+ */
+export default async (input) => {
+  const { directory, client } = input;
   await safeLog(client, "info", `Initializing in ${directory}`);
 
   if (!instances.has(directory)) {
     const initResult = FileFinder.create({
       basePath: directory,
-      aiMode: true,
-      disableMmapCache: true,
-      disableWatch: false,
+      aiMode: false,           // Disable frecency DB (mmap source)
+      disableMmapCache: true,  // Disable file cache (mmap source)
+      disableContentIndexing: true, // Explicitly disable content index (mmap source)
+      disableWatch: false,     // Watcher is stable with mmap OFF
     });
     if (!initResult.ok) {
       await safeLog(client, "error", `fff init failed: ${initResult.error}`);
@@ -114,30 +154,23 @@ export const FffPlugin = async ({ directory, client }) => {
             if (context.abort.aborted) throw new Error("Aborted");
 
             const userLimit = args.limit || DEFAULT_GREP_LIMIT;
-            const opts = {
+            const limit = Math.max(1, userLimit);
+
+            const baseOpts = {
               mode: "regex",
               smartCase: args.caseSensitive !== true,
               beforeContext: args.context ?? 0,
               afterContext: args.context ?? 0,
-              maxMatchesPerFile: Math.min(userLimit, DEFAULT_MAX_MATCHES_PER_FILE),
+              maxMatchesPerFile: limit, // Follow user's limit so per-file caps never pre-empt
             };
 
-            const result = finder.grep(args.pattern, opts);
-            if (!result.ok) {
-              await safeLog(client, "error", `fff grep error: ${result.error}`);
-              throw new Error(`fff grep error: ${result.error}`);
-            }
+            // Fetch results across pages until limit is met or no more exist
+            let matches = await fetchGrepPages(finder, args.pattern, baseOpts, limit);
+            if (matches.length === 0) return "";
 
-            let matches = result.value?.items;
-
-            if (!Array.isArray(matches)) {
-              await safeLog(client, "warn", `fff grep returned unexpected result structure`);
-              return "";
-            }
-
+            // Filter by path using shared helper
             if (args.path) {
-              const target = normalizePath(args.path);
-              matches = matches.filter((m) => m.relativePath === target || m.relativePath.startsWith(target + "/"));
+              matches = filterByPath(matches, "relativePath", args.path);
             }
 
             if (args.exclude) {
@@ -146,9 +179,7 @@ export const FffPlugin = async ({ directory, client }) => {
               matches = matches.filter((m) => !compiledPatterns.some((test) => test(m.relativePath)));
             }
 
-            const limit = Math.max(1, userLimit);
             const returnedMatches = matches.length > limit ? matches.slice(0, limit) : matches;
-
             const lines = returnedMatches.map((m) => `${m.relativePath}:${m.lineNumber}:${m.lineContent}`);
             return lines.join("\n");
           } catch (err) {
@@ -180,7 +211,9 @@ export const FffPlugin = async ({ directory, client }) => {
             await waitForScan(scanPromise, TOOL_TIMEOUT_MS);
             if (context.abort.aborted) throw new Error("Aborted");
 
-            const pageSize = Math.max(1, args.limit || DEFAULT_GLOB_LIMIT);
+            const userLimit = args.limit || DEFAULT_GLOB_LIMIT;
+            // Increase internal page size when filtering by path
+            const pageSize = args.path ? Math.max(userLimit, 1000) : userLimit;
             let items;
 
             if (args.type === "directory") {
@@ -198,12 +231,14 @@ export const FffPlugin = async ({ directory, client }) => {
               return "";
             }
 
-            let result = items.map((item) => item.relativePath);
-
+            // Filter by path
             if (args.path) {
-              const target = normalizePath(args.path);
-              result = result.filter((p) => p === target || p.startsWith(target + "/"));
+              items = filterByPath(items, "relativePath", args.path);
             }
+
+            const limit = Math.max(1, userLimit);
+            const returnedItems = items.length > limit ? items.slice(0, limit) : items;
+            const result = returnedItems.map((item) => item.relativePath);
 
             return result.join("\n");
           } catch (err) {

@@ -1,12 +1,12 @@
 # opencode-fff-search
 
-OpenCode plugin that replaces the default `grep` and `glob` file search tools with [fff.nvim](https://github.com/dmtrKovalenko/fff.nvim)'s ultra-fast, typo-resistant, frecency-ranked search engine.
+OpenCode plugin that replaces the default `grep` and `glob` file search tools with [fff.nvim](https://github.com/dmtrKovalenko/fff.nvim)'s ultra-fast, typo-resistant search engine.
 
 ## Features
 
 - **Blazing fast** - In-memory index, searches complete in milliseconds
 - **Typo-resistant** - Fuzzy matching handles typos gracefully
-- **Frecency-ranked** - Frequently accessed files rank higher
+- **Frecency-ranked** - Frequently accessed files rank higher (disabled for stability, see SIGBUS investigation)
 - **Git-aware** - Shows file status (modified, staged, untracked)
 - **Smart case** - Auto-detects case sensitivity
 - **Zero config** - Works out of the box
@@ -106,16 +106,18 @@ opencode debug config --print-logs 2>&1 | grep fff
 
 This plugin overrides OpenCode's built-in `grep` and `glob` tools. When the AI (or user) performs file search, it uses fff's in-memory index instead of spawning ripgrep processes.
 
-- **`grep`** -> fff's content search with smart-case, regex, and fuzzy modes
+- **`grep`** -> fff's content search via cursor-based pagination — results are fetched
+  across multiple "pages" of files (in frecency order) until the requested limit is met
+  or no more results exist
 - **`glob`** -> fff's fuzzy file finder with frecency ranking
 
-> **Note:** Memory-mapped file caching (mmap) is disabled to prevent SIGBUS crashes.
-fff's mmap warmup maps all indexed files into memory, which causes an unrecoverable
-bus error when any mapped file is truncated or deleted during a session (editor saves,
-git operations, builds). Standard file I/O is used instead, with negligible
-performance impact for agent workloads where the index scan dominates latency.
-The file watcher is enabled — new and deleted files appear in search results within ~2s.
-See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md) for full root cause analysis.
+> **Note:** Memory-mapped file caching (mmap) and the frecency database (LMDB) are disabled
+> to prevent SIGBUS crashes. fff's mmap warmup maps all indexed files into memory, which causes an
+> unrecoverable bus error when any mapped file is truncated or deleted during a session (editor saves,
+> git operations, builds). Standard file I/O is used instead, with negligible performance impact
+> for agent workloads where the index scan dominates latency.
+> The file watcher is enabled — new and deleted files appear in search results within ~1s.
+> See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md) for full root cause analysis.
 
 ## Tool Parameters
 
@@ -189,9 +191,9 @@ On a Chromium-sized repo (500k files):
 | Single search | 3-9s | <10ms |
 | 100 searches | 5-15min | <1s |
 
-Mmap caching is disabled for stability (see above). The file watcher is enabled —
-new and deleted files appear in search within ~1s. On a 48K-file repo, search latency
-averages 6ms (grep) and 6.5ms (glob) with the watcher active.
+Mmap caching and the LMDB frecency database are disabled for stability (see above).
+The file watcher is enabled — new and deleted files appear in search within ~1s. On a
+48K-file repo, search latency averages 6ms (grep) and 6.5ms (glob) with the watcher active.
 
 [Read the full fff.nvim performance analysis](https://github.com/dmtrKovalenko/fff.nvim#what-is-fff-and-why-use-it-over-ripgrep-or-fzf)
 
@@ -214,8 +216,12 @@ averages 6ms (grep) and 6.5ms (glob) with the watcher active.
 
 ### Plugin not loading
 - Ensure plugin file is in correct `plugins/` directory (check with `find ~/.config/opencode/plugins`)
-- Verify `~/.config/opencode/package.json` has `"type": "module"`
+- Verify `~/.config/opencode/package.json` has `"type": "module"` (required for ESM imports)
 - Check dependencies installed: `ls ~/.config/opencode/node_modules/@ff-labs/fff-node`
+- For development, symlink the plugin for live updates:
+  ```bash
+  ln -sf $(pwd)/index.js ~/.config/opencode/plugins/opencode-fff-search.js
+  ```
 
 ### "Binary not found" errors
 The fff native library didn't download. Install manually:
@@ -245,8 +251,8 @@ The first search triggers index building (typically 500ms-2s depending on repo s
 - On Windows: run terminal as admin if accessing protected directories
 
 ### SIGBUS crashes (signal 7)
-The plugin disables mmap caching and file watching to prevent SIGBUS. If you see SIGBUS:
-- Ensure you're running v0.2.7+ (which includes `disableMmapCache: true` and `disableWatch: true`)
+The plugin disables mmap caching and the AI mode frecency database to prevent SIGBUS. The file watcher is enabled — new files appear in search within ~1s. If you see SIGBUS:
+- Ensure you're running v0.3.1+ (which includes `disableMmapCache: true`, `aiMode: false`, and `disableContentIndexing: true`)
 - Check `node -e "import('./index.js')"` to verify the plugin loads the latest version
 - See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md) for root cause details
 
@@ -257,7 +263,7 @@ git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search
 npm install
 
-# Run the automated test suite (78 core unit tests)
+# Run the automated test suite (85 core unit tests)
 node --test test/index.test.js
 
 # Run session simulation tests (synthetic project stress tests)

@@ -68,21 +68,19 @@ export function createProjectStructure(simDir) {
 }
 
 /**
- * Create a FileFinder with safety flags (disableMmapCache, disableWatch).
+ * Create a FileFinder with production-matching safety flags.
  */
 export async function initSimFinder(FileFinder, simDir) {
   const result = FileFinder.create({
     basePath: simDir,
-    aiMode: true,
-    disableMmapCache: true,
-    disableWatch: true,
+    aiMode: false,           // Match production
+    disableMmapCache: true,  // Match production
+    disableContentIndexing: true, // Match production
+    disableWatch: false,     // Match production
   });
   if (!result.ok) throw new Error(`sim finder init failed: ${result.error}`);
   const finder = result.value;
-  const scan = await finder.waitForScan(15000);
-  if (scan.ok && !scan.value) {
-    // partial scan ok
-  }
+  await finder.waitForScan(15000);
   return finder;
 }
 
@@ -90,9 +88,9 @@ export async function initSimFinder(FileFinder, simDir) {
  * Clean up a finder and its temp directory.
  */
 export function simCleanup(finder, simDir) {
-  if (finder && !finder.isDestroyed) {
-    try { finder.destroy(); } catch { /* best effort */ }
-  }
+  // finder.destroy() blocks indefinitely when watcher is active (fff-node 0.6.4 bug).
+  // Since initSimFinder uses disableWatch:false, we skip destroy and let the OS
+  // reclaim native resources when the test process exits.
   rmSync(simDir, { recursive: true, force: true });
 }
 

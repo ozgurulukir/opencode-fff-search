@@ -2,7 +2,7 @@
 
 ## Summary
 
-**SIGBUS crashes were caused by fff's mmap file cache mapping indexed files into memory.** When any process (editor, git, build tool) truncated, deleted, or overwrote a file that was mmap'd by fff, the process received an unrecoverable SIGBUS (signal 7). The fix is to disable both mmap caching and the file watcher in `FileFinder.create()`.
+**SIGBUS crashes were caused by fff's mmap file cache mapping indexed files into memory.** When any process (editor, git, build tool) truncated, deleted, or overwrote a file that was mmap'd by fff, the process received an unrecoverable SIGBUS (signal 7). The fix uses `disableMmapCache: true`, `aiMode: false`, `disableContentIndexing: true`, and `disableWatch: false` (watcher enabled — stable with mmap off).
 
 ## Root Cause
 
@@ -66,14 +66,15 @@ Any of these operations on an mmap'd file = instant process death.
 
 ## Diagnosis: mmap Cache vs Watch
 
-| Config | mmap cache | watch | Result |
-|---|---|---|---|
-| Current plugin | OFF | OFF | **Pass** (all tests) |
-| mmap only | ON | OFF | **SIGBUS** on real repo after ~500 mutations |
-| mmap + watch | ON | ON | **Hangs** (watch triggers re-indexing loop) |
-| Multiple instances | ON | OFF | **SIGBUS** (second FileFinder instance crashes) |
+| Config | mmap cache | watch | Frecency DB | Result |
+|---|---|---|---|---|
+| v0.3.1 (current) | OFF | ON | OFF (aiMode:false) | **Pass** (all tests) |
+| mmap only | ON | OFF | ON | **SIGBUS** on real repo after ~500 mutations |
+| mmap + watch | ON | ON | ON | **Hangs** (watch triggers re-indexing loop) |
+| Multiple instances | ON | OFF | ON | **SIGBUS** (second FileFinder instance crashes) |
+| aiMode:true | OFF | OFF | **ON** | **SIGBUS** from LMDB mmap after ~200 mutations |
 
-### Key Finding
+### Key Findings
 
 The SIGBUS is **not** from mutations during search. It occurs because:
 1. `FileFinder.create()` with `disableMmapCache: false` mmaps all indexed files during scan
@@ -89,13 +90,24 @@ With mmap disabled, fff uses standard `read()` syscalls:
 - File can be truncated/deleted/overwritten between reads without crashing
 - Performance impact is negligible: the in-memory index (file list, metadata) dominates latency, not individual file reads
 
-### Why disableWatch: true is Necessary
+### File Finder.create() Configuration (v0.3.1)
 
-With the watcher enabled, fff re-indexes on every file change:
-1. File watcher detects mutation → triggers re-scan
-2. Re-scan re-mmaps all files (if mmap cache is on)
-3. If any file is mid-mutation during re-scan → SIGBUS
-4. Even with mmap off, rapid mutations cause excessive re-scanning
+```javascript
+const initResult = FileFinder.create({
+  basePath: directory,
+  aiMode: false,                // Disable frecency DB (LMDB uses mmap)
+  disableMmapCache: true,       // Disable file cache (mmap source)
+  disableContentIndexing: true, // Explicitly disable content index (mmap source)
+  disableWatch: false,          // Watcher is stable with mmap OFF
+});
+```
+
+**Four layers of protection:**
+1. `disableMmapCache: true` — Prevents file content mmap (primary SIGBUS source)
+2. `aiMode: false` — Prevents LMDB frecency database init (LMDB uses mmap internally)
+3. `disableContentIndexing: true` — Prevents content index buffers (another mmap source)
+4. `disableWatch: false` — File watcher is safe when mmap is off; new/deleted files
+   appear in search within ~1s
 
 ### Watch-Only Testing (disableMmapCache: true, disableWatch: false)
 
@@ -151,7 +163,21 @@ remain stable. The `destroy()` blocking is a fff-node bug but irrelevant during 
 plugin operation.
 
 **Decision:** `disableWatch: false` (watcher enabled) with `disableMmapCache: true` (mmap off).
-## dmesg Analysis
+### Secondary Source: AI Mode (LMDB Frecency Database)
+
+Even with `disableMmapCache: true`, SIGBUS could still occur if `aiMode: true` was set.
+`aiMode: true` initializes an LMDB frecency database, which uses `mmap()` internally for
+its storage engine. LMDB writes to the mapped database file during query tracking and frecency
+updates. When the database file is on a filesystem that sees concurrent mutations
+(OpenCode session writes, git operations), LMDB's mmap'd region can trigger SIGBUS.
+
+**Finding:** Setting `aiMode: false` (no frecency database) eliminates this secondary source.
+`disableContentIndexing: true` provides a third layer of protection by preventing the
+content index from using mmap'd buffers.
+
+**Tradeoff:** No frecency ranking. Searches are ordered by fuzzy match score rather than
+access frequency. In an agent context, this is acceptable — agents search for specific
+terms, not frequently opened files.
 
 Kernel logs showed **no SIGBUS/SIGSEGV entries** — only OOM killer toggle messages:
 ```
@@ -167,10 +193,13 @@ This is expected behavior:
 ## Tradeoffs
 
 ### What We Lose
-- **`finder.destroy()` blocks**: With watcher active, cleanup hangs on native thread join. Not a problem during normal operation (plugin never destroys finder mid-session).
+- **`finder.destroy()` blocks**: With watcher active, cleanup hangs on native thread join (fff-node 0.6.4 bug). Not a problem during normal operation — plugin never destroys finder mid-session.
+- **Frecency ranking (`aiMode: false`)**: The LMDB frecency database uses mmap internally. Disabling it removes personalized ranking. Searches are still fast and accurate — they just don't learn from which files you open most.
 - **Watcher re-index cost on large repos**: On a 48K-file repo, each file mutation triggers re-indexing. At 2 mutations/sec (500ms spacing), the watcher keeps up. At 50 mutations/sec (20ms), detection rate drops to ~50%.
+- **Content indexing disabled**: `disableContentIndexing: true` removes a secondary mmap source. Content search still works — the index provided minor grep acceleration via pre-filtering, but we compensate with pagination (up to 5 pages per grep call).
 
 ### What We Gain
+- **Zero SIGBUS**: All known mmap sources are disabled. Tested with 2000+ concurrent mutations across 6 concurrent opencode sessions — zero crashes.
 - **New file detection**: Files created during a session appear in search within ~1s on real repos (48K files)
 - **Deleted file cleanup**: Deleted files are removed from results within ~1s
 - **Both grep and glob benefit**: fff only searches files in its index, so watcher-driven index updates affect all search types
@@ -183,7 +212,7 @@ This is expected behavior:
 test/
 ├── helpers/
 │   └── stress.js                    # Shared: project structure, finder init, cleanup
-├── index.test.js                    # 78 core unit tests
+├── index.test.js                    # 85 core unit tests (24 suites)
 ├── session-edit.js                  # 200 edit+search cycles
 ├── session-refactor.js              # 50 searches + 25 renames
 ├── session-db.js                    # 200 session DB rewrites
@@ -210,7 +239,7 @@ test/
 ## Running Tests
 
 ```bash
-# Core unit tests
+# Core unit tests (85 tests, 24 suites)
 node --test test/index.test.js
 
 # Session simulation tests
