@@ -6,7 +6,8 @@ OpenCode plugin that replaces the default `grep` and `glob` file search tools wi
 
 - **Blazing fast** - In-memory index, searches complete in milliseconds
 - **Typo-resistant** - Fuzzy matching handles typos gracefully
-- **Frecency-ranked** - Frequently accessed files rank higher (disabled for stability, see SIGBUS investigation)
+- **Smart mode** - Auto-selects between literal (SIMD) and regex matching based on
+  pattern content; plain text with parentheses, dots, and commas matches correctly
 - **Git-aware** - Shows file status (modified, staged, untracked)
 - **Smart case** - Auto-detects case sensitivity
 - **Zero config** - Works out of the box
@@ -204,7 +205,7 @@ On a Chromium-sized repo (500k files):
 Mmap caching and the LMDB frecency database are disabled for stability; the file
 watcher is temporarily disabled due to an upstream stack overflow bug
 ([fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)).
-48K-file repo, search latency averages 6ms (grep) and 6.5ms (glob) with the watcher active.
+Search latency averages 6ms (grep) and 6.5ms (glob) on a 48K-file repo.
 
 [Read the full fff.nvim performance analysis](https://github.com/dmtrKovalenko/fff.nvim#what-is-fff-and-why-use-it-over-ripgrep-or-fzf)
 

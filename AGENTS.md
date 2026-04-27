@@ -19,7 +19,7 @@ OpenCode plugin that replaces OpenCode's default `grep` and `glob` file search t
 
 The plugin exports a single async function `FffPlugin` that:
 
-1. **Initializes** a `FileFinder` instance from `@ff-labs/fff-node` with `aiMode: true`
+1. **Initializes** a `FileFinder` instance from `@ff-labs/fff-node` with `aiMode: false`
 2. **Creates a shared `scanPromise`** to avoid multiple concurrent index scans (critical for performance)
 3. **Returns tool definitions** that override OpenCode's built-in `grep` and `glob` tools
 
@@ -34,7 +34,7 @@ OpenCode tool call → FffPlugin.execute() → fff FileFinder → Format result 
 
 ### Key Components
 
-- `FileFinder.create({ basePath: directory, aiMode: true })` - Initializes fff search engine
+- `FileFinder.create({ basePath: directory, aiMode: false })` - Initializes fff search engine
 - `finder.waitForScan(15000)` - Waits for initial index build (15s timeout)
 - `finder.grep(pattern, opts)` - Content search with smart case, context, limits
 - `finder.fileSearch(pattern, { pageSize })` - Fuzzy file search
@@ -181,9 +181,10 @@ The plugin disables mmap caching in `FileFinder.create()`:
 ```javascript
 const initResult = FileFinder.create({
   basePath: directory,
-  aiMode: true,
+  aiMode: false,           // Disable frecency DB (LMDB mmap source)
   disableMmapCache: true,  // Prevents SIGBUS on file truncation
-  disableWatch: false,       // Watcher ON: new/deleted files appear in search
+  disableContentIndexing: true, // Explicitly disable content index (mmap source)
+  disableWatch: true,      // Disabled due to upstream stack overflow (fff.nvim#422)
 });
 ```
 
@@ -258,13 +259,13 @@ The `caseSensitive` parameter has non-obvious behavior:
 
 ```javascript
 const userLimit = args.limit || DEFAULT_GREP_LIMIT;
-const opts = {
-  mode: "regex",
-  smartCase: args.caseSensitive !== true,  // Default is smart case (true) unless explicitly false
-  beforeContext: args.context ?? 0,
-  afterContext: args.context ?? 0,
-  maxMatchesPerFile: Math.min(userLimit, DEFAULT_MAX_MATCHES_PER_FILE),  // 100
-};
+    const opts = {
+      mode: detectGrepMode(args.pattern),  // Auto: plain (SIMD) or regex
+      smartCase: args.caseSensitive !== true,  // Default is smart case
+      beforeContext: args.context ?? 0,
+      afterContext: args.context ?? 0,
+      maxMatchesPerFile: limit,  // Follows user limit
+    };
 ```
 
 - If `caseSensitive: true` (explicit), then `smartCase: false`
@@ -496,12 +497,12 @@ Some tests also accept `NODEJS_REPO` env var to point to a different repo.
 
 8. **peerDependency**: `@opencode-ai/plugin` is a peer dependency—users install it, not the plugin itself.
 
-9. **aiMode setting**: `FileFinder.create({ basePath: directory, aiMode: true })` enables AI-optimized ranking. Don't change this without understanding fff's AI mode.
+9. **aiMode setting**: `FileFinder.create({ basePath: directory, aiMode: false })` disables the LMDB frecency database (another mmap source). v0.3.3+ uses `false`.
 
 10. **Result indexing**: `result.value.items` contains matches/items, not the result object itself. Always check `result.ok` first.
 11. **disableMmapCache**: Always use `disableMmapCache: true`. mmap maps files into memory; any truncation/delete causes SIGBUS. Standard read() is used instead.
 
-12. **disableWatch**: Set to `false` (watcher enabled). Watcher detects new/deleted files within ~2s. Only safe when `disableMmapCache: true` — do NOT combine with mmap cache ON.
+12. **disableWatch**: Set to `true` (watcher disabled) due to upstream stack overflow bug in fff-node v0.6.4 ([fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)).
 
 ## Dependencies
 
@@ -569,6 +570,6 @@ When modifying the plugin:
 - **Scan timeout**: 15s absolute limit for `waitForScan`, 5s practical limit in tools
 - **Result limits**: Grep defaults to 1000 matches, glob defaults to 100 results
 - **mmap cache**: Disabled (`disableMmapCache: true`) for stability — prevents SIGBUS on file truncation
-- **File watcher**: Enabled (`disableWatch: false`) — new/deleted files appear in search within ~2s
+- **File watcher**: Disabled (`disableWatch: true`) due to upstream stack overflow bug (fff.nvim#422)
 
 The shared `scanPromise` pattern is critical—without it, concurrent tool calls would trigger multiple scans, causing severe performance degradation.
