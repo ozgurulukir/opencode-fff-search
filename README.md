@@ -236,9 +236,9 @@ Search latency averages 6ms (grep) and 6.5ms (glob) on a 48K-file repo.
   ```
 
 ### Plugin not updating after upgrade
-Node.js caches ES modules per process. If you update the plugin and continue an existing
-session (`opencode -c`), the old version remains loaded. Always start a fresh `opencode`
-session after upgrading the plugin.
+If the plugin seems to use old behavior after an upgrade, try starting a fresh `opencode`
+session instead of continuing an existing one (`opencode -c`). Node.js caches ES modules
+per process, so a continued session may still have the previous version loaded.
 
 ### "Binary not found" errors
 The fff native library didn't download. Install manually:
