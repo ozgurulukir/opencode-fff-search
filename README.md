@@ -106,10 +106,12 @@ opencode debug config --print-logs 2>&1 | grep fff
 
 This plugin overrides OpenCode's built-in `grep` and `glob` tools. When the AI (or user) performs file search, it uses fff's in-memory index instead of spawning ripgrep processes.
 
-- **`grep`** -> fff's content search via cursor-based pagination — results are fetched
-  across multiple "pages" of files (in frecency order) until the requested limit is met
-  or no more results exist
-- **`glob`** -> fff's fuzzy file finder with frecency ranking
+- **`grep`** -> fff's content search with auto mode detection — plain literal
+  (SIMD) by default, automatically switches to regex when the pattern contains
+  intentional regex syntax (\\s, |, [0-9], etc.).
+- Results are fetched across multiple "pages" of files (cursor-based pagination)
+  until the requested limit is met or no more results exist
+- **`glob`** -> fff's fuzzy file finder
 
 > **Note:** Memory-mapped file caching (mmap) and the frecency database (LMDB) are disabled
 > to prevent SIGBUS crashes. fff's mmap warmup maps all indexed files into memory, which causes an
@@ -129,12 +131,18 @@ Search file contents with fff's fast, typo-resistant search.
 
 | Parameter | Type | Required? | Default | Description |
 |-----------|------|-----------|---------|-------------|
-| `pattern` | `string` | Yes | — | Search pattern (plain text, regex, or fuzzy) |
+| `pattern` | `string` | Yes | — | Search pattern (literal or regex — auto-detected) |
 | `path` | `string` | No | — | Subdirectory or file to search within |
 | `exclude` | `string` | No | — | Comma-separated glob patterns to exclude (e.g., `"*.log,node_modules/**"`) |
 | `caseSensitive` | `boolean` | No | `false` (smart-case) | Enable case-sensitive matching |
 | `context` | `number` | No | `0` | Number of lines before/after match to include |
 | `limit` | `number` | No | `1000` | Maximum total matches to return |
+
+**Search mode auto-detection:** The plugin automatically selects the matching engine:
+- **Plain (SIMD)** — Used by default. Fast, literal matching. Handles patterns with parentheses, dots, commas, and other code symbols that regex engines fail on.
+- **Regex** — Automatically activated when the pattern contains intentional regex syntax: `\s`, `\d`, `|`, `[...]`, `^`, `$`, or escaped quantifiers.
+
+If plain mode returns no results, the plugin retries with regex mode as a fallback.
 
 **Smart-case behavior:** By default (`caseSensitive: false`), fff auto-detects case sensitivity—if the pattern contains uppercase letters, it becomes case-sensitive.
 

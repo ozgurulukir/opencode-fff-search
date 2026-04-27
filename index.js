@@ -12,6 +12,36 @@ const DEFAULT_GREP_LIMIT = 1000;
 const DEFAULT_GLOB_LIMIT = 100;
 const MAX_GREP_PAGES = 5; // Max pagination rounds to prevent runaway searches
 
+// Regex: characters that need escaping to be treated as literals if the user
+// likely intended a literal search. Escaped versions (\\(, \\[, etc.) don't
+// Regex: matches patterns that contain intentional regex syntax:
+// \s, \d, \w, \b, \n, \t (escaped character classes)
+// \\ (literal backslash in pattern → regex escape intent)
+// | (alternation: import|export)
+// [abc] (character classes)
+// \+ (quantifier: one or more)
+// \* (quantifier: zero or more)
+// \? (quantifier: optional)
+// ^ or $ (anchors)
+//
+// Parentheses (), dots ., commas , and other symbols that appear in normal
+// code are NOT treated as regex triggers — they are sent via plain mode.
+const REGEX_METACHAR_RE = /\\[sdwnbtDSWNBT]|\\|\||\[\^?\]|\[\^?[^\]]+\]|\\\+|\\\*|\\\?|[\^\$]/;
+
+/**
+ * Return "regex" if the pattern looks like an intentional regex, otherwise "plain".
+ * "plain" uses SIMD-accelerated literal matching, which is faster and correctly
+ * matches text with parentheses, dots, etc. that regex mode silently drops.
+ *
+ * A pattern is treated as regex ONLY when it contains unescaped metacharacters
+ * that go beyond simple literal text (e.g., "\s+", "import|export", "foo[0-9]").
+ * Literal patterns like "(idempotent, schema from migrations)" or "example.com"
+ * are sent as plain so they match the actual file contents.
+ */
+function detectGrepMode(pattern) {
+  return REGEX_METACHAR_RE.test(pattern) ? "regex" : "plain";
+}
+
 /**
  * Shared helper to filter results by relative path.
  * Handles both exact matches and subdirectory matches.
@@ -24,36 +54,52 @@ function filterByPath(items, pathKey, targetPath) {
     return path === target || path.startsWith(target + "/");
   });
 }
+
 /**
  * Fetch grep results across multiple pages via cursor-based pagination.
  * fff-node grep() returns results one "page" of files at a time (frecency-ordered).
  * This helper accumulates items across pages until the target limit is met,
  * no more results exist, the page ceiling is reached, or the request is aborted.
  *
+ * If a regex fallback error is detected (fff fell back to literal matching
+ * because the regex was invalid), a warning is logged via the provided
+ * client reference.
+ *
  * @param {object} finder - FileFinder instance
  * @param {string} pattern - Grep pattern
  * @param {object} baseOpts - GrepOptions (mode, smartCase, beforeContext, afterContext)
  * @param {number} targetLimit - Desired match count
  * @param {AbortSignal} abortSignal - AbortController signal
+ * @param {object} [client] - OpenCode client for logging regex fallback warnings
  * @param {number} maxPages - Page ceiling (default: MAX_GREP_PAGES)
- * @returns {Array} Accumulated GrepMatch items
+ * @returns {{ items: Array, regexFallbackError: string|null }} Accumulated items and any regex warning
  */
-async function fetchGrepPages(finder, pattern, baseOpts, targetLimit, abortSignal, maxPages = MAX_GREP_PAGES) {
+async function fetchGrepPages(finder, pattern, baseOpts, targetLimit, abortSignal, client, maxPages = MAX_GREP_PAGES) {
   const items = [];
   let cursor = null;
+  let regexFallbackError = null;
   for (let page = 0; page < maxPages; page++) {
     if (abortSignal?.aborted) break;
     const opts = { ...baseOpts, cursor, timeBudgetMs: GREP_TIME_BUDGET_MS };
     const result = finder.grep(pattern, opts);
     if (!result.ok) break;
     const pageResult = result.value;
+    // Capture regex fallback error from the first page that reports one
+    if (pageResult.regexFallbackError && !regexFallbackError) {
+      regexFallbackError = pageResult.regexFallbackError;
+    }
+    // If fff returned results in regex mode but had a fallback error, log it
+    // so we know the "regex" → "literal" fallback happened.
+    if (pageResult.regexFallbackError && client) {
+      await safeLog(client, "warn", `fff regex fallback: ${pageResult.regexFallbackError}`);
+    }
     if (!Array.isArray(pageResult.items) || pageResult.items.length === 0) break;
     items.push(...pageResult.items);
     if (items.length >= targetLimit) break;
     if (!pageResult.nextCursor) break;
     cursor = pageResult.nextCursor;
   }
-  return items;
+  return { items, regexFallbackError };
 }
 
 
@@ -158,17 +204,43 @@ export default async (input) => {
             const userLimit = args.limit || DEFAULT_GREP_LIMIT;
             const limit = Math.max(1, userLimit);
 
+            const mode = detectGrepMode(args.pattern);
             const baseOpts = {
-              mode: "regex",
+              mode,
               smartCase: args.caseSensitive !== true,
               beforeContext: args.context ?? 0,
               afterContext: args.context ?? 0,
               maxMatchesPerFile: limit, // Follow user's limit so per-file caps never pre-empt
             };
 
-            // Fetch results across pages until limit is met, no more exist, or aborted
-            let matches = await fetchGrepPages(finder, args.pattern, baseOpts, limit, context.abort.signal);
-            if (matches.length === 0) return "";
+            let { items: matches, regexFallbackError } = await fetchGrepPages(
+              finder, args.pattern, baseOpts, limit, context.abort.signal, client
+            );
+
+            // Failsafe: if plain mode returned nothing but the pattern had
+            // metacharacters that plain can't handle AND regex mode wasn't
+            // tried (because it looked like plain), retry with regex.
+            if (matches.length === 0 && mode === "plain") {
+              const retryOpts = { ...baseOpts, mode: "regex" };
+              const retry = await fetchGrepPages(
+                finder, args.pattern, retryOpts, limit, context.abort.signal, client
+              );
+              if (retry.items.length > 0) {
+                await safeLog(client, "warn",
+                  `fff plain mode returned 0, retried with regex and got ${retry.items.length} matches`
+                );
+                matches = retry.items;
+                regexFallbackError = retry.regexFallbackError;
+              }
+            }
+
+            if (matches.length === 0) {
+              await safeLog(client, "warn",
+                `fff grep returned 0 matches for pattern "${args.pattern.substring(0, 80)}"` +
+                (regexFallbackError ? ` (regex fallback: ${regexFallbackError})` : "")
+              );
+              return "";
+            }
 
             // Filter by path using shared helper
             if (args.path) {
