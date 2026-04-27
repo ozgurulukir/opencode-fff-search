@@ -2,7 +2,7 @@
 
 ## Summary
 
-**SIGBUS crashes were caused by fff's mmap file cache mapping indexed files into memory.** When any process (editor, git, build tool) truncated, deleted, or overwrote a file that was mmap'd by fff, the process received an unrecoverable SIGBUS (signal 7). The fix uses `disableMmapCache: true`, `aiMode: false`, `disableContentIndexing: true`, and `disableWatch: false` (watcher enabled — stable with mmap off).
+**SIGBUS crashes were caused by fff's mmap file cache mapping indexed files into memory.** When any process (editor, git, build tool) truncated, deleted, or overwrote a file that was mmap'd by fff, the process received an unrecoverable SIGBUS (signal 7). The fix uses `disableMmapCache: true`, `aiMode: false`, `disableContentIndexing: true`, and `disableWatch: true` (watcher disabled due to upstream stack overflow — see [fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)).
 
 ## Root Cause
 
@@ -98,16 +98,16 @@ const initResult = FileFinder.create({
   aiMode: false,                // Disable frecency DB (LMDB uses mmap)
   disableMmapCache: true,       // Disable file cache (mmap source)
   disableContentIndexing: true, // Explicitly disable content index (mmap source)
-  disableWatch: false,          // Watcher is stable with mmap OFF
+  disableWatch: true,           // Disabled due to upstream stack overflow (fff.nvim#422)
 });
 ```
 
 **Four layers of protection:**
 1. `disableMmapCache: true` — Prevents file content mmap (primary SIGBUS source)
 2. `aiMode: false` — Prevents LMDB frecency database init (LMDB uses mmap internally)
-3. `disableContentIndexing: true` — Prevents content index buffers (another mmap source)
-4. `disableWatch: false` — File watcher is safe when mmap is off; new/deleted files
-   appear in search within ~1s
+4. `disableWatch: true` — Temporarily disabled due to upstream stack overflow bug in fff-node
+   v0.6.4 ([fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)). When the upstream
+   fix lands, this can be set back to `false` to re-enable file watching.
 
 ### Watch-Only Testing (disableMmapCache: true, disableWatch: false)
 
@@ -162,7 +162,11 @@ within 1s on real repos, deleted files are cleaned up within 1s, and concurrent 
 remain stable. The `destroy()` blocking is a fff-node bug but irrelevant during normal
 plugin operation.
 
-**Decision:** `disableWatch: false` (watcher enabled) with `disableMmapCache: true` (mmap off).
+**Decision:** `disableWatch: true` (watcher disabled) with `disableMmapCache: true` (mmap off). While
+testing confirmed the watcher is stable with mmap off, an upstream stack overflow in fff-node v0.6.4
+([fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)) requires disabling the watcher
+until a fix is released. The watcher can be re-enabled by setting `disableWatch: false` after
+the upstream fix is confirmed.
 ### Secondary Source: AI Mode (LMDB Frecency Database)
 
 Even with `disableMmapCache: true`, SIGBUS could still occur if `aiMode: true` was set.
