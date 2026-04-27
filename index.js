@@ -12,8 +12,6 @@ const DEFAULT_GREP_LIMIT = 1000;
 const DEFAULT_GLOB_LIMIT = 100;
 const MAX_GREP_PAGES = 5; // Max pagination rounds to prevent runaway searches
 
-// Regex: characters that need escaping to be treated as literals if the user
-// likely intended a literal search. Escaped versions (\\(, \\[, etc.) don't
 // Regex: matches patterns that contain intentional regex syntax:
 // \s, \d, \w, \b, \n, \t (escaped character classes)
 // \\ (literal backslash in pattern → regex escape intent)

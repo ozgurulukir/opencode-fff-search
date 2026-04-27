@@ -140,16 +140,12 @@ tool({
 try {
   const result = finder.grep(args.pattern, opts);
   if (!result.ok) {
-    await client.app.log({
-      body: { service: "fff-plugin", level: "error", message: `fff grep error: ${result.error}` }
-    });
+    await safeLog(client, "error", `fff grep error: ${result.error}`);
     throw new Error(`fff grep error: ${result.error}`);
   }
   // Process result...
 } catch (err) {
-  await client.app.log({
-    body: { service: "fff-plugin", level: "error", message: `EXECUTE EXCEPTION: ${err.message}\n${err.stack}` }
-  });
+  await safeLog(client, "error", `grep error: ${err.message}`);
   throw err; // Re-throw to surface error to user
 }
 ```
@@ -193,10 +189,10 @@ process truncates or deletes a mapped file, reading it triggers SIGBUS (unrecove
 OpenCode's agent workload constantly mutates files (edits, git ops, session writes). Standard
 `read()` syscalls are used instead — performance impact is negligible.
 
-**Why watch is enabled**: The file watcher detects new and deleted files within ~2 seconds.
-Without it, files created during a session (agent creates new files, npm install) never
-appear in search results. With `disableMmapCache: true`, the watcher is safe — the SIGBUS
-risk only materializes when mmap cache is also enabled.
+**Why watch is disabled**: The file watcher is temporarily disabled (`disableWatch: true`)
+due to an upstream stack overflow bug in fff-node v0.6.4
+([fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)).
+New files created during a session will not appear in search until OpenCode restarts.
 
 **Known issue**: `finder.destroy()` blocks indefinitely when the watcher is active (native
 thread join). This is a fff-node bug but doesn't affect normal operation since the plugin
@@ -508,7 +504,7 @@ Some tests also accept `NODEJS_REPO` env var to point to a different repo.
 
 ### Runtime
 - `@ff-labs/fff-node` ^0.6.4 - Core search engine (Rust wrapper)
-- `minimatch` ^9.0.0 - Glob pattern matching for `exclude` parameter
+- `minimatch` ^10.2.5 - Glob pattern matching for `exclude` parameter
 
 ### Peer Dependencies
 ``
@@ -518,7 +514,7 @@ opencode-fff-search-plugin/
 ├── test/
 │   ├── helpers/
 │   │   └── stress.js                  # Shared helpers: project structure, finder init
-│   ├── index.test.js                  # 78 core unit tests
+│   ├── index.test.js                  # 85 core unit tests
 │   ├── session-edit.js                # Edit+search stress test
 │   ├── session-refactor.js            # Rename during search stress test
 │   ├── session-db.js                  # Session DB stress test
