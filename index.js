@@ -6,7 +6,7 @@ import { minimatch } from "minimatch";
 const TRAILING_SLASH_RE = /\/+$/;
 const SCAN_TIMEOUT_MS = 15000;
 const TOOL_TIMEOUT_MS = 5000;
-const GREP_TIME_BUDGET_MS = 15000; // Wall-clock cap per grep call
+const GREP_TIME_BUDGET_MS = 5000;  // Wall-clock cap per grep page (keeps abort responsive)
 const MAX_LIMIT = 5000;
 const DEFAULT_GREP_LIMIT = 1000;
 const DEFAULT_GLOB_LIMIT = 100;
@@ -28,19 +28,21 @@ function filterByPath(items, pathKey, targetPath) {
  * Fetch grep results across multiple pages via cursor-based pagination.
  * fff-node grep() returns results one "page" of files at a time (frecency-ordered).
  * This helper accumulates items across pages until the target limit is met,
- * no more results exist, or the page ceiling is reached.
+ * no more results exist, the page ceiling is reached, or the request is aborted.
  *
  * @param {object} finder - FileFinder instance
  * @param {string} pattern - Grep pattern
  * @param {object} baseOpts - GrepOptions (mode, smartCase, beforeContext, afterContext)
  * @param {number} targetLimit - Desired match count
+ * @param {AbortSignal} abortSignal - AbortController signal
  * @param {number} maxPages - Page ceiling (default: MAX_GREP_PAGES)
  * @returns {Array} Accumulated GrepMatch items
  */
-async function fetchGrepPages(finder, pattern, baseOpts, targetLimit, maxPages = MAX_GREP_PAGES) {
+async function fetchGrepPages(finder, pattern, baseOpts, targetLimit, abortSignal, maxPages = MAX_GREP_PAGES) {
   const items = [];
   let cursor = null;
   for (let page = 0; page < maxPages; page++) {
+    if (abortSignal?.aborted) break;
     const opts = { ...baseOpts, cursor, timeBudgetMs: GREP_TIME_BUDGET_MS };
     const result = finder.grep(pattern, opts);
     if (!result.ok) break;
@@ -164,8 +166,8 @@ export default async (input) => {
               maxMatchesPerFile: limit, // Follow user's limit so per-file caps never pre-empt
             };
 
-            // Fetch results across pages until limit is met or no more exist
-            let matches = await fetchGrepPages(finder, args.pattern, baseOpts, limit);
+            // Fetch results across pages until limit is met, no more exist, or aborted
+            let matches = await fetchGrepPages(finder, args.pattern, baseOpts, limit, context.abort.signal);
             if (matches.length === 0) return "";
 
             // Filter by path using shared helper

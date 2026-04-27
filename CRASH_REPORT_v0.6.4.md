@@ -1,17 +1,29 @@
-# Crash Report: fff-node v0.6.4 Native SIGBUS (Stack Overflow)
+# Crash Report: fff-node v0.6.4 Native SIGBUS (Stack Overflow in Grep)
 
-Date: 2026-04-27 12:47:58 +03
-Environment: Debian forky/sid x64, Kernel 7.0.1-x64v3-xanmod1, Node.js 25.9.0
-Plugin: opencode-fff-search v0.3.1, linked via symlink
+## Summary
 
-## Crash Details
-- **Signal**: 7 (BUS)
-- **Core file**: `/var/lib/systemd/coredump/core.opencode.1000.*.zst` (79.6 MB)
-- **OpenCode CLI**: `opencode -c` (interactive chat mode), version 1.14.28
-- **Crash location**: `libfff_c.so + 0x15aca8`
-- **Binary info**: `libfff_c.so` is stripped — no build-id, no debug symbols
+fff-node v0.6.4's native library (`libfff_c.so`) has an unbounded recursion bug in grep
+processing. The crash occurs on native worker threads during content search. It cannot
+be prevented by plugin configuration — the defect is in the native binary.
 
-## Plugin Configuration
+Two crashes observed in the same session:
+
+| # | Date | PID | Project | Thread | Config |
+|---|------|-----|---------|--------|--------|
+| 1 | 2026-04-27 12:47:58 | 83045 | ipc-cost-tbfs-qwen-vue (~28K files) | 83324 | v0.3.1, `disableWatch: false` |
+| 2 | 2026-04-27 15:20:08 | 116712 | vue-hakedis | 117952 | v0.3.2, `disableWatch: true` |
+
+Crash #2 with `disableWatch: true` proves the watcher thread is **not** required to
+trigger the bug. The recursion is in grep's own processing path.
+
+## Environment
+
+- **OS**: Debian forky/sid x64, Kernel 7.0.1-x64v3-xanmod1
+- **Node.js**: 25.9.0
+- **OpenCode**: 1.14.28, interactive chat mode (`opencode -c`)
+- **fff-node**: v0.6.4 (latest published)
+
+## Plugin Configuration (Crash #2 — watcher disabled)
 
 ```javascript
 FileFinder.create({
@@ -19,93 +31,109 @@ FileFinder.create({
   aiMode: false,                // Disable frecency DB (LMDB mmap)
   disableMmapCache: true,       // Disable file content mmap
   disableContentIndexing: true, // Disable content index mmap
-  disableWatch: false,          // File watcher enabled (stable with mmap off)
+  disableWatch: true,           // Disabled — not the crash source
 });
 ```
 
-All known mmap sources were already disabled. The crash is **not** from reading a truncated mmap'd file.
+All known mmap sources and the watcher were disabled. The crash still occurred.
 
-## Stack Trace Analysis
+## Crash Details (Both Instances)
 
-Crashing thread: 83324 (native fff worker thread, not V8 main thread)
+- **Signal**: 7 (BUS)
+- **Crash location**: `libfff_c.so + 0x15aca8`
+- **Binary**: Stripped — no build-id, no debug symbols
+- **Core file**: `/var/lib/systemd/coredump/core.opencode.*.zst`
+
+## Stack Trace (Crash #2)
+
+Crashing thread: 117952 (native fff worker, not V8)
 
 ```
-#0  0x00007fdc21b5aca8 libfff_c.so + 0x15aca8    (crash site)
-#1  0x00007fdc21d1bf8d libfff_c.so + 0x31bf8d
-#2  0x00007fdc21d2ee7a libfff_c.so + 0x32ee7a
-#3  0x00007fdc21d2ce3c libfff_c.so + 0x32ce3c
-#4  0x00007fdc21d852f9 libfff_c.so + 0x3852f9
-#5  0x00007fdc21c34937 libfff_c.so + 0x234937
-#6  0x00007fdc21c3859c libfff_c.so + 0x23859c
-#7  0x00007fdc21bebf52 libfff_c.so + 0x1ebf52
-#8  0x00007fdc21c38c63 libfff_c.so + 0x238c63      ← start of recursion
-#9  0x00007fdc21bebf52 libfff_c.so + 0x1ebf52      ←
-#10 0x00007fdc21c38c63 libfff_c.so + 0x238c63      ← repeating pair
-#11 0x00007fdc21bebf52 libfff_c.so + 0x1ebf52      ←
-#12 0x00007fdc21c38c63 libfff_c.so + 0x238c63      ←
-#13 0x00007fdc21bebd93 libfff_c.so + 0x1ebd93      ←
-#14 0x00007fdc21c38c63 libfff_c.so + 0x238c63      ← stack overflow
-... continues for >20 frames
+  #0  0x00007fe8d0d5aca8 libfff_c.so + 0x15aca8    (crash site)
+  #1  0x00007fe8d0f1bf8d libfff_c.so + 0x31bf8d
+  #2  0x00007fe8d0f2f3ca libfff_c.so + 0x32f3ca
+  #3  0x00007fe8d0f2ce3c libfff_c.so + 0x32ce3c
+  #4  0x00007fe8d0f852f9 libfff_c.so + 0x3852f9    ← grep entry point
+  #5  0x00007fe8d0e34937 libfff_c.so + 0x234937
+  #6  0x00007fe8d0e3859c libfff_c.so + 0x23859c
+  #7  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← recursive pair A
+  #8  0x00007fe8d0e38c63 libfff_c.so + 0x238c63    ← recursive pair B
+  #9  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← A
+ #10  0x00007fe8d0e38c63 libfff_c.so + 0x238c63    ← B
+ #11  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← A
+ #12  0x00007fe8d0e38c63 libfff_c.so + 0x238c63    ← B
+ #13  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← A
+ #14  0x00007fe8d0e38c63 libfff_c.so + 0x238c63    ← B
+ #15  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← A
+ #16  0x00007fe8d0e38c63 libfff_c.so + 0x238c63    ← B
+ #17  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← A
+ #18  0x00007fe8d0e524f9 libfff_c.so + 0x2524f9
+ #19  0x00007fe8d0f09cd6 libfff_c.so + 0x309cd6
+ #20  0x00007fe8d0f0a299 libfff_c.so + 0x30a299
+ #21  0x00007fe8d0f0cbe7 libfff_c.so + 0x30cbe7
+ #22  0x00007fe8d0f0d22e libfff_c.so + 0x30d22e
+ #23  0x00007fe8d0ff1976 libfff_c.so + 0x3f1976
+ #24  0x00007fe92e994da9 libc.so.6 + 0x95da9
+ #25  0x00007fe92ea13e08 libc.so.6 + 0x114e08
 ```
 
-**Pattern**: Frames #8-#14 alternate between `0x1ebf52` and `0x238c63` (libfff_c.so).
-This is **not** an mmap page fault -- it's a **stack overflow** from unbounded recursion
-inside libfff_c.so's native code.
+**Recursive pair**: `0x1ebd93` (crash #2) / `0x1ebf52` (crash #1) ↔ `0x238c63`
+**Grep entry**: `0x3852f9` (same in both crashes)
+**Crash frame**: `0x15aca8` — leaf function called after recursion exhausts stack
 
-The crash frame (#0, `0x15aca8`) is *not* part of the recursive loop -- it is the
-function called at the bottom of the call chain after the recursion exhausted the
-stack. The full path is: **call into grep/scan -> watcher event dispatch ->
-recursive processing loop (`0x1ebf52` <-> `0x238c63`) -> leaf function (`0x15aca8`)
--> SIGBUS as stack collides with guard page.**
+The recursion repeats the pair 10+ times before the stack collides with the guard page.
 
-## Root Cause (Inferred)
+## Root Cause
 
-fff-node v0.6.4's native library (`libfff_c.so`) has an **unbounded recursion bug**
-in its watcher/grep interop code. The evidence:
+The crash is in `libfff_c.so`'s grep processing, specifically an internal function
+pair that recurses without a base case. The entry path (`0x3852f9`) is the grep/scan
+dispatch, which calls into `0x234937`/`0x23859c`, which enters the recursive pair.
 
-- **Crash is on a native worker thread** (83324), not the V8 main thread
-- **Recursion is in the watcher/grep interaction path**: frames #1-#6 show the call
-  descends from `0x3852f9` (likely a scan or grep entry point) into the recursive pair
-- **The recursive pair (`0x1ebf52` <-> `0x238c63`) is the defect** -- it cycles without
-  a base case or depth limit
+This is **not** triggered by:
+- Mmap file cache (disabled)
+- File system watcher (disabled, crash #2)
+- Frecency database / LMDB (disabled)
+- Content indexing (disabled)
 
-Likely scenario:
-1. The file system watcher detects an event (inotify notification)
-2. The watcher callback invokes index update logic
-3. The index update modifies something the watcher is watching
-4. The watcher re-fires the callback -> re-enters index update -> loops
+This is triggered by:
+- Large project file count (28K+ files)
+- Specific query patterns that hit the recursive code path
+- The grep operation itself entering unbounded recursion on certain directory trees or
+  file iteration patterns
 
-This is consistent with:
-- Crash occurring with `disableWatch: false` (watcher enabled)
-- Crash NOT occurring with `disableWatch: true` (no watcher thread)
-- 28K-file project providing many watcher events to trigger the loop
 ## Repro Conditions
 
-- **Project**: ipc-cost-tbfs-qwen-vue (~28,261 files)
-- **OpenCode mode**: Interactive chat (`opencode -c`) with background file mutations
-- **Watcher enabled**: `disableWatch: false`
-- **Background mutations**: Concurrent file operations (ccache, build artifacts, git operations)
-- **Duration**: Unknown (OpenCode was running in interactive chat mode)
+- **Project size**: 28K+ files
+- **All safety flags enabled**: `disableMmapCache: true`, `aiMode: false`,
+  `disableContentIndexing: true`, `disableWatch: true`
+- **Mode**: Interactive `opencode -c` with repeated grep calls
+- **Duration**: Variable — crash #1 after ~X hours, crash #2 after ~2.5 hours
 
-## Mitigation Options
+## Mitigation
 
-| Option | Change | Effect |
-|--------|--------|--------|
-| **Disable watcher** | `disableWatch: true` | Eliminates crash, new files invisible until restart |
-| Run without plugin | Remove plugin | No fff at all, falls back to ripgrep |
-| Report upstream | File issue with fff-node | Fix in future release |
+No software mitigation is possible. All configurable safety options are already at
+maximum. The defect is in the native binary (`libfff_c.so`) and requires an upstream
+fix.
+
+### Current Status
+
+The plugin is installed but the crash makes it unsafe for production use. Users should
+either:
+
+1. **Remove the plugin** — Fall back to OpenCode's built-in ripgrep-based grep
+2. **Wait for upstream fix** — Track [fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)
 
 ## Timeline
 
 | Date | Event |
 |------|-------|
-| 2026-04-27 12:47:58 | SIGBUS crash in libfff_c.so (stack overflow in native thread) |
-| 2026-04-27 09:28 | Plugin symlinked to v0.3.1 (all mmap sources disabled) |
+| 2026-04-27 15:20:08 | Crash #2: SIGBUS with `disableWatch: true` — proves grep is the cause |
+| 2026-04-27 12:47:58 | Crash #1: SIGBUS with `disableWatch: false` — initially attributed to watcher |
+| 2026-04-27 09:28 | Plugin symlinked to repo for live updates |
 | 2026-04-25 | Initial test suite and stability fixes deployed |
 
 ## References
 
-- fff-node v0.6.4 npm package: https://www.npmjs.com/package/@ff-labs/fff-node/v/0.6.4
-- SIGBUS_INVESTIGATION.md: Previous findings on mmap-related crashes
-- OpenCode issue tracker: https://github.com/dmtrKovalenko/fff.nvim/issues
-- Linux mmap(2): SIGBUS behavior on truncated files
+- fff.nvim#422: https://github.com/dmtrKovalenko/fff.nvim/issues/422
+- fff-node v0.6.4: https://www.npmjs.com/package/@ff-labs/fff-node/v/0.6.4
+- SIGBUS_INVESTIGATION.md: Mmap crash analysis (separate issue, resolved)

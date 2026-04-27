@@ -254,11 +254,19 @@ The first search triggers index building (typically 500ms-2s depending on repo s
 - On Windows: run terminal as admin if accessing protected directories
 
 ### SIGBUS crashes (signal 7)
-The plugin disables mmap caching, the AI mode frecency database, content indexing, and the file watcher to prevent SIGBUS. If you see SIGBUS:
-- Ensure you are running v0.3.1+ (which includes `disableMmapCache: true`, `aiMode: false`, `disableContentIndexing: true`, and `disableWatch: true`)
-- Check `node -e "import('./index.js')"` to verify the plugin loads the latest version
-- See [CRASH_REPORT_v0.6.4.md](./CRASH_REPORT_v0.6.4.md) for the latest native crash analysis
-- See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md) for root cause details
+
+**WARNING**: fff-node v0.6.4 has an upstream stack overflow bug in grep processing
+([fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)) that cannot be prevented
+by plugin configuration. The crash occurs in libfff_c.so native code during grep on large projects.
+The plugin should not be used in production until upstream ships a fix.
+
+All configurable safety options are at maximum:
+- `disableMmapCache: true` — no file content mmap
+- `aiMode: false` — no LMDB frecency database
+- `disableContentIndexing: true` — no content index buffers
+- `disableWatch: true` — no file system watcher threads
+
+See [CRASH_REPORT_v0.6.4.md](./CRASH_REPORT_v0.6.4.md) for full analysis.
 
 ## Development
 

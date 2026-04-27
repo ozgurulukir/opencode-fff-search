@@ -163,10 +163,14 @@ remain stable. The `destroy()` blocking is a fff-node bug but irrelevant during 
 plugin operation.
 
 **Decision:** `disableWatch: true` (watcher disabled) with `disableMmapCache: true` (mmap off). While
-testing confirmed the watcher is stable with mmap off, an upstream stack overflow in fff-node v0.6.4
+testing confirmed the watcher is stable with mmap off, an upstream stack overflow bug in fff-node v0.6.4
 ([fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)) requires disabling the watcher
-until a fix is released. The watcher can be re-enabled by setting `disableWatch: false` after
-the upstream fix is confirmed.
+until a fix is released.
+
+**Note:** A second crash was confirmed with `disableWatch: true`, proving the stack overflow is in
+grep processing itself (`libfff_c.so`), not the watcher thread. The defect is in the native binary
+and cannot be prevented by plugin configuration. See [CRASH_REPORT_v0.6.4.md](./CRASH_REPORT_v0.6.4.md).
+The plugin should not be used in production until the upstream fix lands.
 ### Secondary Source: AI Mode (LMDB Frecency Database)
 
 Even with `disableMmapCache: true`, SIGBUS could still occur if `aiMode: true` was set.
