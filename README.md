@@ -139,7 +139,7 @@ Search file contents with fff's fast, typo-resistant search.
 | `limit` | `number` | No | `1000` | Maximum total matches to return |
 
 **Search mode auto-detection:** The plugin automatically selects the matching engine:
-- **Plain (SIMD)** — Used by default. Fast, literal matching. Handles patterns with parentheses, dots, commas, and other code symbols that regex engines fail on.
+- **Plain (SIMD)** — Used by default. Fast, literal matching. Correctly handles patterns with parentheses, dots, commas, and other code symbols that regex engines choke on. For example, searching for `(idempotent, schema from migrations)` works in plain mode but would silently return no results in regex mode.
 - **Regex** — Automatically activated when the pattern contains intentional regex syntax: `\s`, `\d`, `|`, `[...]`, `^`, `$`, or escaped quantifiers.
 
 If plain mode returns no results, the plugin retries with regex mode as a fallback.
