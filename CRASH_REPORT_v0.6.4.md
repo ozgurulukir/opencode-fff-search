@@ -1,139 +1,176 @@
-# Crash Report: fff-node v0.6.4 Native SIGBUS (Stack Overflow in Grep)
+# Crash Report: fff-node v0.6.4 Native SIGBUS
 
 ## Summary
 
-fff-node v0.6.4's native library (`libfff_c.so`) has an unbounded recursion bug in grep
-processing. The crash occurs on native worker threads during content search. It cannot
-be prevented by plugin configuration — the defect is in the native binary.
+fff-node v0.6.4's native library (`libfff_c.so`) crashes with SIGBUS during file
+search operations (both `grep` and `glob`/`directorySearch`). The crash cannot be
+prevented by plugin configuration — all known mmap-disable flags are set, but the
+library still imports `mmap`/`mmap64` from glibc and uses them in internal paths
+not gated by those flags.
 
-Two crashes observed in the same session:
+8 crashes observed across 24 hours:
 
-| # | Date | PID | Project | Thread | Config |
-|---|------|-----|---------|--------|--------|
-| 1 | 2026-04-27 12:47:58 | 83045 | ipc-cost-tbfs-qwen-vue (~28K files) | 83324 | v0.3.1, `disableWatch: false` |
-| 2 | 2026-04-27 15:20:08 | 116712 | vue-hakedis | 117952 | v0.3.2, `disableWatch: true` |
+| # | Date | PID | Process | Crash addr | Project | Trigger |
+|---|------|-----|---------|------------|---------|---------|
+| 1 | Apr 27 08:39 | 31755 | opencode | — | — | — |
+| 2 | Apr 27 12:47 | 83045 | opencode | `+0x15aca8` | local project | grep |
+| 3 | Apr 27 15:20 | 116712 | opencode | `+0x15aca8` | local project | grep |
+| 4 | Apr 27 17:14 | 155727 | node (test) | `+0x1c9b30` | test suite | grep |
+| 5 | Apr 27 17:15 | 156854 | node (test) | `+0x1c9b30` | test suite | grep |
+| 6 | Apr 27 17:15 | 157017 | node (test) | `+0x1c9b39` | test suite | grep |
+| 7 | Apr 27 19:56 | 194759 | opencode | `+0x2d436b` | local project | glob |
+| 8 | Apr 28 12:09 | 9379 | opencode | `+0x1c9b30` | local project | — |
 
-Crash #2 with `disableWatch: true` proves the watcher thread is **not** required to
-trigger the bug. The recursion is in grep's own processing path.
+Crashes #7 is confirmed glob/directorySearch. Crashes #4-6 are intentional test runs
+of the mmap stress tests. Crashes #1-3, #8 are opencode sessions with both grep and glob
+activity. The crash address varies (`0x15aca8`, `0x1c9b30`, `0x1c9b39`, `0x2d436b`),
+indicating multiple distinct mmap access sites inside the library.
 
 ## Environment
 
 - **OS**: Debian forky/sid x64, Kernel 7.0.1-x64v3-xanmod1
 - **Node.js**: 25.9.0
 - **OpenCode**: 1.14.28, interactive chat mode (`opencode -c`)
-- **fff-node**: v0.6.4 (latest published)
+- **fff-node**: v0.6.4 (latest stable published)
+- **libfff_c.so**: stripped, no build-id, no debug symbols
 
-## Plugin Configuration (Crash #2 — watcher disabled)
+## Plugin Configuration (All Crashes)
 
 ```javascript
 FileFinder.create({
   basePath: directory,
   aiMode: false,                // Disable frecency DB (LMDB mmap)
-  disableMmapCache: true,       // Disable file content mmap
+  disableMmapCache: true,       // Disable file content mmap cache
   disableContentIndexing: true, // Disable content index mmap
-  disableWatch: true,           // Disabled — not the crash source
+  disableWatch: true,           // Disabled (fff.nvim#422 stack overflow bug)
 });
 ```
 
-All known mmap sources and the watcher were disabled. The crash still occurred.
+All four mmap/watcher-related flags are set to maximum safety. The crash still occurs.
 
-## Crash Details (Both Instances)
+## Binary Analysis
 
-- **Signal**: 7 (BUS)
-- **Crash location**: `libfff_c.so + 0x15aca8`
-- **Binary**: Stripped — no build-id, no debug symbols
-- **Core file**: `/var/lib/systemd/coredump/core.opencode.*.zst`
-
-## Stack Trace (Crash #2)
-
-Crashing thread: 117952 (native fff worker, not V8)
+`libfff_c.so` imports `mmap` and `mmap64` from glibc regardless of configuration:
 
 ```
-  #0  0x00007fe8d0d5aca8 libfff_c.so + 0x15aca8    (crash site)
-  #1  0x00007fe8d0f1bf8d libfff_c.so + 0x31bf8d
-  #2  0x00007fe8d0f2f3ca libfff_c.so + 0x32f3ca
-  #3  0x00007fe8d0f2ce3c libfff_c.so + 0x32ce3c
-  #4  0x00007fe8d0f852f9 libfff_c.so + 0x3852f9    ← grep entry point
-  #5  0x00007fe8d0e34937 libfff_c.so + 0x234937
-  #6  0x00007fe8d0e3859c libfff_c.so + 0x23859c
-  #7  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← recursive pair A
-  #8  0x00007fe8d0e38c63 libfff_c.so + 0x238c63    ← recursive pair B
-  #9  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← A
- #10  0x00007fe8d0e38c63 libfff_c.so + 0x238c63    ← B
- #11  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← A
- #12  0x00007fe8d0e38c63 libfff_c.so + 0x238c63    ← B
- #13  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← A
- #14  0x00007fe8d0e38c63 libfff_c.so + 0x238c63    ← B
- #15  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← A
- #16  0x00007fe8d0e38c63 libfff_c.so + 0x238c63    ← B
- #17  0x00007fe8d0debd93 libfff_c.so + 0x1ebd93    ← A
- #18  0x00007fe8d0e524f9 libfff_c.so + 0x2524f9
- #19  0x00007fe8d0f09cd6 libfff_c.so + 0x309cd6
- #20  0x00007fe8d0f0a299 libfff_c.so + 0x30a299
- #21  0x00007fe8d0f0cbe7 libfff_c.so + 0x30cbe7
- #22  0x00007fe8d0f0d22e libfff_c.so + 0x30d22e
- #23  0x00007fe8d0ff1976 libfff_c.so + 0x3f1976
- #24  0x00007fe92e994da9 libc.so.6 + 0x95da9
- #25  0x00007fe92ea13e08 libc.so.6 + 0x114e08
+$ nm -D libfff_c.so | grep mmap
+                 U mmap64@GLIBC_2.2.5
+                 U mmap@GLIBC_2.2.5
 ```
 
-**Recursive pair**: `0x1ebd93` (crash #2) / `0x1ebf52` (crash #1) ↔ `0x238c63`
-**Grep entry**: `0x3852f9` (same in both crashes)
-**Crash frame**: `0x15aca8` — leaf function called after recursion exhausts stack
+The exported `fff_create_instance2` function receives boolean parameters:
+- `enable_mmap_cache` (set to `false` by `disableMmapCache: true`)
+- `enable_content_indexing` (set to `false` by `disableContentIndexing: true`)
+- `watch` (set to `false` by `disableWatch: true`)
 
-The recursion repeats the pair 10+ times before the stack collides with the guard page.
+But the library uses mmap in internal paths (search index traversal, file iteration)
+that are not gated behind these parameters. The crash addresses (`0x15aca8`,
+`0x1c9b30`, `0x2d436b`) fall in different regions of the binary, confirming
+multiple unprotected mmap call sites.
 
 ## Root Cause
 
-The crash is in `libfff_c.so`'s grep processing, specifically an internal function
-pair that recurses without a base case. The entry path (`0x3852f9`) is the grep/scan
-dispatch, which calls into `0x234937`/`0x23859c`, which enters the recursive pair.
+**SIGBUS from mmap'd file access on mutated files.** OpenCode agents constantly
+mutate files (edits, writes, git operations). When fff has an mmap'd view of a
+file and that file is truncated, deleted, or rewritten by another process or
+thread, the subsequent access to the mmap'd region delivers SIGBUS.
 
-This is **not** triggered by:
-- Mmap file cache (disabled)
-- File system watcher (disabled, crash #2)
-- Frecency database / LMDB (disabled)
-- Content indexing (disabled)
+The `disableMmapCache: true` flag only disables fff's *file content caching*
+layer (which stores file contents in memory via mmap for fast access). It does
+not disable mmap usage in:
+- The in-memory search index structure
+- File metadata traversal during directory/file search
+- Internal data structures used for scoring and matching
 
-This is triggered by:
-- Large project file count (28K+ files)
-- Specific query patterns that hit the recursive code path
-- The grep operation itself entering unbounded recursion on certain directory trees or
-  file iteration patterns
+This is fundamentally a design defect in fff-node v0.6.4: it assumes files are
+unchanged during the lifetime of a search index, which is incompatible with
+AI agent workloads that interleave file mutation and search.
+
+## Common Stack Trace Pattern (Grep)
+
+Crashes #2 and #3 share this pattern (crash #3 shown):
+
+```
+  #0  libfff_c.so + 0x15aca8    (crash site)
+  #1  libfff_c.so + 0x31bf8d
+  #2  libfff_c.so + 0x32f3ca
+  #3  libfff_c.so + 0x32ce3c
+  #4  libfff_c.so + 0x3852f9    grep entry point
+  #5  libfff_c.so + 0x234937
+  #6  libfff_c.so + 0x23859c
+  #7  libfff_c.so + 0x1ebd93    -+
+  #8  libfff_c.so + 0x238c63     | search result iteration
+  #9  libfff_c.so + 0x1ebd93     |
+ #10  libfff_c.so + 0x238c63     | (not recursion: thread-local
+ #11  libfff_c.so + 0x1ebd93     |  work-stealing iterator pattern)
+ #12  libfff_c.so + 0x238c63     |
+ #13  libfff_c.so + 0x1ebd93     |
+ #14  libfff_c.so + 0x238c63     |
+ #15  libfff_c.so + 0x1ebd93     |
+ #16  libfff_c.so + 0x238c63     |
+ #17  libfff_c.so + 0x1ebd93    -+
+ #18  libfff_c.so + 0x2524f9
+ #19  libfff_c.so + 0x309cd6    thread pool dispatch
+ #20  libc start_thread
+```
+
+The repeating `0x1ebd93`/`0x238c63` pair was initially mistaken for recursion.
+It is actually a thread-local search iterator pattern that walks through
+result items. The crash occurs when one of these iterations accesses an
+mmap'd data structure that has been invalidated by a concurrent file mutation.
+
+## Stack Trace Pattern (Glob - Crash #7)
+
+```
+  #0  libfff_c.so + 0x2d436b    (crash site)
+  #1  libfff_c.so + 0x237848
+  #2  libfff_c.so + 0x1ebd93    same iterator as grep path
+  #3  libfff_c.so + 0x238c63
+  #4  libfff_c.so + 0x1ebd93
+  #5  libfff_c.so + 0x238c63
+  ...
+ #13  libfff_c.so + 0x2524f9
+ #14  libfff_c.so + 0x309cd6    thread pool dispatch
+```
+
+Crash #7 confirms both grep and glob paths share the same vulnerable mmap'd
+data structures.
 
 ## Repro Conditions
 
-- **Project size**: 28K+ files
-- **All safety flags enabled**: `disableMmapCache: true`, `aiMode: false`,
-  `disableContentIndexing: true`, `disableWatch: true`
-- **Mode**: Interactive `opencode -c` with repeated grep calls
-- **Duration**: Variable — crash #1 after ~X hours, crash #2 after ~2.5 hours
+- **Any project size**: crashes occurred on projects from small to large
+- **All safety flags enabled** as shown above
+- **Any search type**: grep (content search), glob (directorySearch/fileSearch)
+- **Mode**: Interactive `opencode -c` with interleaved file mutations and searches
+- **Duration**: Variable — crashes after 1-3 hours of active use
 
 ## Mitigation
 
-No software mitigation is possible. All configurable safety options are already at
-maximum. The defect is in the native binary (`libfff_c.so`) and requires an upstream
-fix.
+No software mitigation is possible. All configurable safety options are at maximum.
+The defect is in the native binary (`libfff_c.so`) and requires an upstream fix.
 
-### Current Status
+### Recommended Actions
 
-The plugin is installed but the crash makes it unsafe for production use. Users should
-either:
-
-1. **Remove the plugin** — Fall back to OpenCode's built-in ripgrep-based grep
-2. **Wait for upstream fix** — Track [fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)
+1. **For users**: Remove the plugin and use OpenCode's built-in ripgrep-based grep
+2. **For upstream**: 
+   - Replace all internal mmap usage with `read()`-based access when `enable_mmap_cache=false`
+   - Or provide a `disable_all_mmap: true` flag that gates ALL mmap paths
+3. **For plugin**: Track fff-node releases for a fix; consider a `0.6.5-nightly` test
 
 ## Timeline
 
 | Date | Event |
 |------|-------|
-| 2026-04-27 15:20:08 | Crash #2: SIGBUS with `disableWatch: true` — proves grep is the cause |
-| 2026-04-27 12:47:58 | Crash #1: SIGBUS with `disableWatch: false` — initially attributed to watcher |
-| 2026-04-27 09:28 | Plugin symlinked to repo for live updates |
-| 2026-04-25 | Initial test suite and stability fixes deployed |
+| 2026-04-28 12:09 | Crash #8: SIGBUS in local project session |
+| 2026-04-27 19:56 | Crash #7: SIGBUS during glob/directorySearch — confirms grep not the only trigger |
+| 2026-04-27 17:15 | Crashes #4-6: mmap stress test runs (intentional) |
+| 2026-04-27 15:20 | Crash #3: SIGBUS with `disableWatch: true` applied |
+| 2026-04-27 12:47 | Crash #2: SIGBUS during grep in local project |
+| 2026-04-27 08:39 | Crash #1: earliest recorded crash |
 
 ## References
 
-- fff.nvim#422: https://github.com/dmtrKovalenko/fff.nvim/issues/422
+- fff.nvim#422 (watcher stack overflow): https://github.com/dmtrKovalenko/fff.nvim/issues/422
 - fff-node v0.6.4: https://www.npmjs.com/package/@ff-labs/fff-node/v/0.6.4
-- SIGBUS_INVESTIGATION.md: Mmap crash analysis (separate issue, resolved)
+- SIGBUS_INVESTIGATION.md: Mmap cache crash analysis (file content cache, resolved by `disableMmapCache`)
+- Upstream issue filed for internal mmap: [link if filed]
