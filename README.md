@@ -7,7 +7,9 @@ OpenCode plugin that replaces the default `grep` and `glob` file search tools wi
 - **Blazing fast** - In-memory index, searches complete in milliseconds
 - **Typo-resistant** - Fuzzy matching handles typos gracefully
 - **Smart mode** - Auto-selects between literal (SIMD) and regex matching based on
-  pattern content; plain text with parentheses, dots, and commas matches correctly
+  pattern content; plain text with parentheses, dots, and commas matches correctly.
+  Now correctly identifies escaped regex characters like `\.`, `\(`, and `\)` as regex triggers.
+- **Improved Path Filtering** - Correctly handles `.` (current directory), absolute paths, and root slashes by searching the entire project instead of returning empty results.
 - **Git-aware** - Shows file status (modified, staged, untracked)
 - **Smart case** - Auto-detects case sensitivity
 - **Zero config** - Works out of the box
@@ -133,7 +135,7 @@ Search file contents with fff's fast, typo-resistant search.
 | Parameter | Type | Required? | Default | Description |
 |-----------|------|-----------|---------|-------------|
 | `pattern` | `string` | Yes | — | Search pattern (literal or regex — auto-detected) |
-| `path` | `string` | No | — | Subdirectory or file to search within |
+| `path` | `string` | No | — | Subdirectory or file to search within. Supports `.` for project root. |
 | `exclude` | `string` | No | — | Comma-separated glob patterns to exclude (e.g., `"*.log,node_modules/**"`) |
 | `caseSensitive` | `boolean` | No | `false` (smart-case) | Enable case-sensitive matching |
 | `context` | `number` | No | `0` | Number of lines before/after match to include |
@@ -141,7 +143,7 @@ Search file contents with fff's fast, typo-resistant search.
 
 **Search mode auto-detection:** The plugin automatically selects the matching engine:
 - **Plain (SIMD)** — Used by default. Fast, literal matching. Handles patterns with parentheses, dots, commas, and other code symbols that regex engines fail on.
-- **Regex** — Automatically activated when the pattern contains intentional regex syntax: `\s`, `\d`, `|`, `[...]`, `^`, `$`, or escaped quantifiers.
+- **Regex** — Automatically activated when the pattern contains intentional regex syntax: `\s`, `\d`, `|`, `[...]`, `^`, `$`, escaped quantifiers, or escaped characters like `\.`, `\(`, `\)`.
 
 If plain mode returns no results, the plugin retries with regex mode as a fallback.
 

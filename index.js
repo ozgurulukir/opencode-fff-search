@@ -4,6 +4,7 @@ import { minimatch } from "minimatch";
 
 // Module-level constants
 const TRAILING_SLASH_RE = /\/+$/;
+const ROOT_PATH_RE = /^(\.|\.\/|\/)$/;  // matches only ".", "./", or "/"
 const SCAN_TIMEOUT_MS = 15000;
 const TOOL_TIMEOUT_MS = 5000;
 const GREP_TIME_BUDGET_MS = 5000;  // Wall-clock cap per grep page (keeps abort responsive)
@@ -46,6 +47,8 @@ function detectGrepMode(pattern) {
  */
 function filterByPath(items, pathKey, targetPath) {
   if (!targetPath) return items;
+  // Root paths (".", "./", "/") mean "search everything" — don't filter
+  if (ROOT_PATH_RE.test(targetPath) || targetPath.startsWith("/")) return items;
   const target = targetPath.replace(TRAILING_SLASH_RE, "");
   return items.filter((item) => {
     const path = item[pathKey];

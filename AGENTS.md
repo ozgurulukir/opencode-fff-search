@@ -253,29 +253,24 @@ if (context.abort.aborted) throw new Error("Aborted");
 
 The `caseSensitive` parameter has non-obvious behavior:
 
-```javascript
-const userLimit = args.limit || DEFAULT_GREP_LIMIT;
-    const opts = {
-      mode: detectGrepMode(args.pattern),  // Auto: plain (SIMD) or regex
-      smartCase: args.caseSensitive !== true,  // Default is smart case
-      beforeContext: args.context ?? 0,
-      afterContext: args.context ?? 0,
-      maxMatchesPerFile: limit,  // Follows user limit
-    };
-```
-
 - If `caseSensitive: true` (explicit), then `smartCase: false`
 - If `caseSensitive: false` or undefined, then `smartCase: true`
 - Smart case: pattern with uppercase → case-sensitive; all lowercase → case-insensitive
 
+**Search mode auto-detection**: The `detectGrepMode` function identifies regex patterns by checking for metacharacters. It correctly identifies escaped characters like `\.`, `\(`, `\)`, etc. because any backslash `\` triggers regex mode.
+
 ### Path Filtering
 
-Path filtering normalizes trailing slashes and supports exact match or prefix:
+Path filtering normalizes trailing slashes and supports exact match or prefix.
+**Important**: Root paths (`"."`, `"./"`, `"/"`) and absolute paths are treated as "search everything" and skip filtering to ensure agent compatibility.
 
 ```javascript
-if (args.path) {
-  const target = args.path.replace(/\/+$/, "");  // Remove trailing slashes
-  matches = matches.filter((m) => m.relativePath === target || m.relativePath.startsWith(target + "/"));
+function filterByPath(items, pathKey, targetPath) {
+  if (!targetPath) return items;
+  if (ROOT_PATH_RE.test(targetPath)) return items;
+  if (targetPath.startsWith("/")) return items;
+  const target = targetPath.replace(/\/+$/, ""); // TRAILING_SLASH_RE
+  return items.filter((m) => m.relativePath === target || m.relativePath.startsWith(target + "/"));
 }
 ```
 
