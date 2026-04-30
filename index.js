@@ -4,7 +4,7 @@ import { minimatch } from "minimatch";
 
 // Module-level constants
 const TRAILING_SLASH_RE = /\/+$/;
-const ROOT_PATH_RE = /^\.?\/?$/;  // matches ".", "./", "/" — means "search everything"
+const ROOT_PATH_RE = /^(\.|\.\/|\/)$/;  // matches only ".", "./", or "/"
 const SCAN_TIMEOUT_MS = 15000;
 const TOOL_TIMEOUT_MS = 5000;
 const GREP_TIME_BUDGET_MS = 5000;  // Wall-clock cap per grep page (keeps abort responsive)
