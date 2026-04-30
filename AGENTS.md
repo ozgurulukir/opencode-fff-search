@@ -269,8 +269,8 @@ function filterByPath(items, pathKey, targetPath) {
   if (!targetPath) return items;
   if (ROOT_PATH_RE.test(targetPath)) return items;
   if (targetPath.startsWith("/")) return items;
-  const target = targetPath.replace(TRAILING_SLASH_RE, "");
-  matches = matches.filter((m) => m.relativePath === target || m.relativePath.startsWith(target + "/"));
+  const target = targetPath.replace(/\/+$/, ""); // TRAILING_SLASH_RE
+  return items.filter((m) => m.relativePath === target || m.relativePath.startsWith(target + "/"));
 }
 ```
 
