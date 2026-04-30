@@ -48,9 +48,7 @@ function detectGrepMode(pattern) {
 function filterByPath(items, pathKey, targetPath) {
   if (!targetPath) return items;
   // Root paths (".", "./", "/") mean "search everything" — don't filter
-  if (ROOT_PATH_RE.test(targetPath)) return items;
-  // Absolute paths can't match relative paths — skip filtering
-  if (targetPath.startsWith("/")) return items;
+  if (ROOT_PATH_RE.test(targetPath) || targetPath.startsWith("/")) return items;
   const target = targetPath.replace(TRAILING_SLASH_RE, "");
   return items.filter((item) => {
     const path = item[pathKey];
