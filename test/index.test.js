@@ -104,14 +104,12 @@ before(async () => {
   ctx = createContext(tmpDir);
 
   // Wait for scan — poll until we get results or timeout at 15s
+  // NOTE: We do NOT call grepExecute here because finder.grep can panic in
+  // fff-core on the first call when the content index is still building.
+  // Individual tests rely on grepExecute's built-in waitForScan() to handle this.
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
-    try {
-      const probe = await grepExecute({ pattern: "import" }, ctx);
-      const probeOutput = typeof probe === "string" ? probe : (probe && probe.output) || "";
-      if (probeOutput.length > 0) break;
-    } catch { /* scan not ready yet */ }
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 200));
   }
 });
 
@@ -155,11 +153,16 @@ describe("FffPlugin", () => {
     });
 
     it("should cache finder instance per directory (no double scan)", async () => {
-      // FffPlugin logs 'Initializing' unconditionally (before cache check).
-      // Verify caching by checking no errors and valid tool returns.
-      const freshDir = createTempProject();
+      // createTempProject() calls cleanupTempProject(tmpDir) internally
+      // which deletes the shared test directory.  That breaks the Rust
+      // overlay index state and can trigger a segmentation fault
+      // (grep.rs:2110 slice panic) when the next suite runs
+      // finder.grep() with a stale overflow_start > files.len().
+      // Use a fresh unique directory instead.
+      const freshDir = join(__dirname, ".tmp-fresh-" + process.pid + "-" + Date.now());
       try {
         const { client, logs } = createMockClient();
+        mkdirSync(freshDir, { recursive: true });
         const r1 = await FffPlugin({ directory: freshDir, client });
         const r2 = await FffPlugin({ directory: freshDir, client });
         assert.ok(r1.tool.grep && r1.tool.glob);
@@ -167,7 +170,7 @@ describe("FffPlugin", () => {
         const errors = logs.filter((l) => l.level === "error");
         assert.equal(errors.length, 0, "Should have no init errors");
       } finally {
-        cleanupTempProject(freshDir);
+        rmSync(freshDir, { recursive: true, force: true });
       }
     });
 

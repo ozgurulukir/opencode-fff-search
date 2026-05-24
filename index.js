@@ -126,17 +126,34 @@ function resolvePath(directory, p) {
  * @returns {{ items: Array, regexFallbackError: string|null }} Accumulated items and any regex warning
  */
 async function fetchGrepPages(finder, pattern, baseOpts, targetLimit, abortSignal, client) {
+  if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fetchGrepPages:', { pattern, targetLimit, mode: baseOpts.mode });
   const items = [];
   let cursor = null;
   let regexFallbackError = null;
+  let emptyRetry = 0;
+  const MAX_EMPTY_RETRIES = 3;
   const maxPages = Math.ceil(targetLimit / 50) + 2;
-  for (let page = 0; page < maxPages; page++) {
+  let page = 0;
+  while (page < maxPages) {
     if (abortSignal?.aborted) break;
     const opts = { ...baseOpts, cursor, timeBudgetMs: GREP_TIME_BUDGET_MS };
     const result = finder.grep(pattern, opts);
+    if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] finder.grep page', page, 'ok:', result.ok, 'error:', result.error, 'items:', result.value?.items?.length, 'totalFilesSearched:', result.value?.totalFilesSearched);
     if (!result.ok) break;
     const pageResult = result.value;
-    // Capture regex fallback error from the first page that reports one
+    if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] pageResult:', JSON.stringify(pageResult).substring(0, 300));
+    // When totalFilesSearched is 0 but items are empty, the content/bigram index
+    // may still be building (concurrent tests can start before it is fully ready).
+    // Retry with a small back-off so the index catch-up completes before we give up.
+    if (pageResult.totalFilesSearched === 0 && items.length === 0 && !abortSignal?.aborted && emptyRetry < MAX_EMPTY_RETRIES) {
+      emptyRetry++;
+      if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] empty (totalFilesSearched=0), retry', emptyRetry, 'for:', pattern);
+      await new Promise((resolve) => setTimeout(resolve, 100 * emptyRetry));
+      continue;  // same cursor, same page
+    }
+    if (emptyRetry > 0) {
+      if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] recovered after', emptyRetry, 'retries, filesSearched:', pageResult.totalFilesSearched);
+    }
     if (pageResult.regexFallbackError && !regexFallbackError) {
       regexFallbackError = pageResult.regexFallbackError;
     }
@@ -150,7 +167,9 @@ async function fetchGrepPages(finder, pattern, baseOpts, targetLimit, abortSigna
     if (items.length >= targetLimit) break;
     if (!pageResult.nextCursor) break;
     cursor = pageResult.nextCursor;
+    page++;
   }
+  if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fetchGrepPages total:', { pattern, totalItems: items.length, regexFallbackError });
   return { items, regexFallbackError };
 }
 
@@ -180,13 +199,17 @@ async function safeLog(client, level, message) {
  * @param {number} timeoutMs - Timeout in milliseconds
  * @returns {Promise<boolean>} - True if scan completed, false otherwise
  */
-async function waitForScan(scanPromise, timeoutMs) {
+  async function waitForScan(scanPromise, timeoutMs) {
+  if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] waitForScan START, scanPromise type:', typeof scanPromise, scanPromise === undefined ? 'UNDEF' : scanPromise === null ? 'NULL' : 'obj');
   try {
-    return await Promise.race([
-      scanPromise.then(() => true),
-      new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+    const resolved = await Promise.race([
+      scanPromise.then((v) => { if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] scanPromise resolved to:', JSON.stringify(v)); return true; }),
+      new Promise((resolve) => setTimeout(() => { if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] waitForScan TIMEOUT'); resolve(false); }, timeoutMs)),
     ]);
-  } catch {
+    if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] waitForScan RESULT:', resolved);
+    return resolved;
+  } catch (e) {
+    if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] waitForScan CATCH:', e.message);
     return false;
   }
 }
@@ -231,6 +254,7 @@ function directFileGrep(filePath, basePath, pattern, ctxLines) {
  * Walks the directory tree respecting SKIP_DIRS, applies path/include/exclude.
  */
 function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, limit) {
+  if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep called:', { dir: dir?.substring(0, 80), basePath: basePath?.substring(0, 80), pattern, hasPathFilter: !!pathFilter, include, exclude, limit });
   const hasUpper = /[A-Z]/.test(pattern);
   const shouldSkip = loadGitignoreFilter(basePath);
   let re;
@@ -241,10 +265,16 @@ function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, 
   }
   const results = [];
   const stack = [dir];
+  let filesRead = 0;
+  let linesTested = 0;
   while (stack.length > 0) {
     const current = stack.pop();
     let entries;
-    try { entries = readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    try { entries = readdirSync(current, { withFileTypes: true }); } catch (e) { 
+      if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep readdirSync error:', current, e.message);
+      continue; 
+    }
+    if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep dir:', current?.substring(0, 80), 'entries:', entries.length);
     for (const entry of entries) {
       if (entry.isDirectory()) {
         if (!shouldSkip(entry.name, true)) {
@@ -279,10 +309,13 @@ function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, 
       // Read and grep
       let content;
       try { content = readFileSync(fullPath, "utf8"); } catch { continue; }
+      filesRead++;
       const lines = content.split("\n");
+      if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep testing file:', rel, 'lines:', lines.length);
       for (let i = 0; i < lines.length; i++) {
         re.lastIndex = 0;
         if (re.test(lines[i])) {
+          linesTested++;
           results.push({
             relativePath: rel,
             fileName: entry.name,
@@ -329,10 +362,11 @@ function globWalk(dir, pattern, basePath, limit, type) {
           if (dirMatch) {
             results.push({ relativePath: rel, fileName: entry.name });
             if (results.length >= limit) return results;
-          }
-        }
-        continue;
-      }
+    }
+  }
+  if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep done:', { dir: dir?.substring(0, 80), pattern, filesRead, linesTested, results: results.length });
+  return results;
+}
       if (!entry.isFile()) continue;
       if (type === "directory") continue;
       if (minimatch(rel, pattern, { dot: true })) {
@@ -368,8 +402,13 @@ export default async (input) => {
     }
 
     const finder = initResult.value;
+    if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] Created finder for:', directory);
     const scanPromise = finder.waitForScan(SCAN_TIMEOUT_MS).catch(() => undefined);
     scanPromise.then(() => safeLog(client, "info", "Initial fff scan complete"));
+
+    // Log scan completion state
+    scanPromise.then((v) => { if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] scanPromise resolved:', JSON.stringify(v)); });
+    scanPromise.catch((e) => { if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] scanPromise ERROR:', e.message); });
 
     instances.set(directory, { finder, scanPromise });
   }
@@ -451,6 +490,7 @@ export default async (input) => {
                   const pathRel = isAbsolute(args.path) ? relative(directory, args.path) : args.path;
                   matches = fsGrep(resolvedSearch, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude, limit);
                 } else {
+                  if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fff routing, pattern:', args.pattern, 'directory:', directory.substring(0, 50));
                   const mode = detectGrepMode(args.pattern);
                   const baseOpts = {
                     mode,
@@ -507,16 +547,23 @@ export default async (input) => {
                     )
                   );
                 }
-                // Failsafe: if fff returned nothing (or results were all filtered out),
-                // try filesystem-level grep as a fallback (handles fff tokenization gaps)
-                if (matches.length === 0) {
-                  const fallbackDir = resolvePath(directory, args.path);
-                  matches = fsGrep(fallbackDir, directory, args.pattern, ctxLines, null, args.include, args.exclude, limit);
-                }
+                 // Failsafe: if fff returned nothing (or results were all filtered out),
+                 // try filesystem-level grep as a fallback (handles fff tokenization gaps)
+                 if (matches.length === 0) {
+                   const fallbackDir = resolvePath(directory, args.path);
+                   if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep failsafe, pattern:', args.pattern, 'fallbackDir:', fallbackDir);
+                   if (existsSync(fallbackDir)) {
+                     matches = fsGrep(fallbackDir, directory, args.pattern, ctxLines, null, args.include, args.exclude, limit);
+                     if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep got', matches.length, 'matches');
+                   } else if (process.env.DEBUG_GREP) {
+                     console.error('[GREP-DEBUG] fsGrep failsafe skipped — fallbackDir does not exist:', fallbackDir);
+                   }
+                 }
               }
             }
 
-        if (matches.length === 0) {
+            if (matches.length === 0) {
+              if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] matches.length === 0, returning empty for pattern:', args.pattern);
               return {
                 title: args.pattern,
                 metadata: { matches: 0, truncated: false },

@@ -490,6 +490,81 @@ node --test test/stress-mmap-single.js    # WARNING: will SIGBUS on real repo
 
 See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md).
 
+## Lessons Learned
+
+### `resolvePath()` vs `path.join()` for user-supplied paths
+
+`path.join()` **concatenates** segments when the second argument is absolute, producing a non-existent merged path:
+
+```js
+join("/home/user", "/absolute/path/to/dir")
+// → "/home/user/absolute/path/to/dir"   ← wrong!
+```
+
+Always use the existing `resolvePath()` helper (index.js:103) which short-circuits on absolute paths:
+
+```js
+function resolvePath(directory, p) {
+  if (!p) return directory;
+  if (isAbsolute(p)) return p;   // absolute paths returned as-is
+  return join(directory, p);
+}
+```
+
+This bug appeared in **two separate PRs** (#1 and #3), both in the `fsGrep` fallback path. Future edits to path resolution should use `resolvePath()` and never call `join(directory, args.path)` directly.
+
+### `fsGrep` performs synchronous I/O — add a `limit` guard early
+
+`fsGrep` walks directories with `readdirSync` and reads files with `readFileSync`. For a common short pattern (e.g. `fn`, `pub`, `use`) the bigram content index in fff returns zero results, the `fsGrep` failsafe fires, and it can block the event loop scanning every file in a directory.
+
+**Fix**: `fsGrep` now accepts an optional `limit` parameter and returns early when `results.length >= limit`. All three call sites (Unicode fallback, outside-index fallback, failsafe fallback) pass `limit` through. When calling `fsGrep`, always pass the caller's `limit` so the early-return guard works correctly.
+
+### The `fsGrep` failsafe is the last-resort fallback — not first choice
+
+`fsGrep` is intentionally slow (sync I/O). It should only be reached through:
+- Unicode/Non-ASCII patterns (`/[^\x00-\x7F]/`) — forced `fsGrep` route
+- Outside-index paths — `args.path` outside the indexed directory
+- Zero-result failsafe — fff returned nothing, recurse to `fsGrep`
+
+For ASCII patterns where fff returns results, `fsGrep` is never called. The exception is PR #3's fix where the failsafe `fallbackDir` was computed with `join()` instead of `resolvePath()`, causing it to silently find nothing.
+
+### Always review upstream tool source when extending parameters
+
+When adding a parameter like `limit` to the grep tool, check [upstream source](https://github.com/anomalyco/opencode/blob/main/packages/opencode/src/tool/grep.ts) first to understand the upstream contract and ensure extensions remain aligned.
+
+19. **Path resolution consistency**: `fsGrep` failsafe fallback must use `resolvePath(directory, args.path)`, not `join()`. Same pattern applies to any new `fsGrep` call sites. (Reinforces Gotcha #9 — fff fallback path bug has recurred twice.)
+
+### Rust binary panic: `grep.rs:2110` slice out-of-bounds in `@ff-labs/fff-node@0.7.0`
+
+The fff-core Rust binary v0.7.0 (and v0.7.1/v0.7.2) contains a known bug at `grep.rs:2110`:
+`for f in &files[overflow_start..]` where `overflow_start > files.len()`.  This
+triggers a process-fatal Rust panic (OS-level SIGABRT / segfault) — no JS catch
+possible — when the bigram overlay's `base_file_count()` (recorded at index-build
+time) disagrees with the current `files.len()` (after files are deleted).
+
+**Trigger in tests**: the "should cache finder instance per directory" test called
+`createTempProject()` which internally calls `cleanupTempProject(tmpDir)`, deleting
+the shared test directory (`tmpDir`).  When the next `before()` hook tried to
+rebuild `tmpDir` but the Rust overlay still held the stale `overflow_start == 9`,
+`findFiles()` returned an empty list and the slice `files[9..]` on a zero-length
+slice panicked the binary.
+
+**Workaround (in JS / tests)**:
+- **index.js** `existsSync(fallbackDir)` guard (line 555): prevents `fsGrep`
+  from walking a directory that has been deleted between the overlay state
+  being recorded and it being read on disk.
+- **`fetchGrepPages` retry loop**: `totalFilesSearched === 0` retries up to
+  3 times with exponential backoff, which mitigates overlay staleness races.
+- **Test fix**: the "cache finder" test now uses its own `freshDir` with
+  `rmSync` instead of `createTempProject()`/`cleanupTempProject()` which
+  would delete the shared `tmpDir`.  This eliminates the race entirely.
+
+**Upstream fix pending**: fff-core main branch now has
+`overflow_start = min(overflow_start, files.len())` at the boundary assignment
+(`grep.rs:2103`), but this fix has not been released in any published version
+as of this writing.  Update `@ff-labs/fff-node` to `>=0.8.2` when it ships
+a crate version that backports this clamp.
+
 ## Common Gotchas
 
 1. **Return format**: Must return `{ output, metadata }` objects, not plain strings. TUI reads metadata for match counts.
@@ -510,6 +585,7 @@ See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md).
 16. **loadGitignoreFilter**: `fsGrep` and `globWalk` parse `.gitignore` to augment `SKIP_DIRS` with directory-name entries. Cached per basePath. Dot-prefixed dirs are always skipped. fff's own index also respects `.gitignore` natively via the Rust `ignore` crate.
 17. **Pagination**: `fetchGrepPages` uses dynamic `maxPages = ceil(limit/50) + 2` instead of fixed `MAX_GREP_PAGES`. fff's `pageLimit` is hardcoded to 50 in `finder.ts` and not exposed via `GrepOptions`.
 18. **Context rendering**: When `context > 0`, the output loop renders `contextBefore` lines (with correct line numbers before the match), the match line itself, then `contextAfter` lines. Both fff grep items and `directFileGrep`/`fsGrep` items carry `contextBefore`/`contextAfter` arrays.
+19. **Test directory deletion can trigger a Rust panic**: `createTempProject()` internally calls `cleanupTempProject(tmpDir)` which deletes the shared test directory. If another test's `before()` hook then tries to rebuild that directory while the Rust overlay's `base_file_count()` is stale (higher than `files.len()`), calling `finder.grep()` inside `fetchGrepPages` will reach `files[overflow_start..]` with `overflow_start > files.len()` — a process-fatal slice panic (`grep.rs:2110`) that cannot be caught in JS. Workaround: never delete `tmpDir` from within a test. Use an isolated directory (e.g. `rmSync` a fresh unique path) so the shared test directory is untouched. The JS-side guards (`existsSync(fallbackDir)` in `fsGrep` failsafe, `totalFilesSearched === 0` retry in `fetchGrepPages`) reduce the blast radius but cannot prevent this specific panic.
 
 ## Dependencies
 
