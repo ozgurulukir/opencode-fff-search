@@ -230,7 +230,7 @@ function directFileGrep(filePath, basePath, pattern, ctxLines) {
  * them correctly due to Unicode normalization causing overcounting).
  * Walks the directory tree respecting SKIP_DIRS, applies path/include/exclude.
  */
-function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude) {
+function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, limit) {
   const hasUpper = /[A-Z]/.test(pattern);
   const shouldSkip = loadGitignoreFilter(basePath);
   let re;
@@ -291,6 +291,9 @@ function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude) 
             contextBefore: ctxLines > 0 ? lines.slice(Math.max(0, i - ctxLines), i) : undefined,
             contextAfter: ctxLines > 0 ? lines.slice(i + 1, i + 1 + ctxLines) : undefined,
           });
+          if (limit && results.length >= limit) {
+            return results;
+          }
         }
       }
     }
@@ -436,7 +439,7 @@ export default async (input) => {
                 const pathRel = args.path
                   ? (isAbsolute(args.path) ? relative(directory, args.path) : args.path)
                   : null;
-                matches = fsGrep(searchDir, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude);
+                matches = fsGrep(searchDir, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude, limit);
               } else {
                 // ASCII patterns: use fff's indexed search
                 // If path is outside the indexed directory, fall back to fsGrep
@@ -446,7 +449,7 @@ export default async (input) => {
                 const isOutsideIndex = args.path && !resolvedSearch.startsWith(directory + "/") && resolvedSearch !== directory;
                 if (isOutsideIndex) {
                   const pathRel = isAbsolute(args.path) ? relative(directory, args.path) : args.path;
-                  matches = fsGrep(resolvedSearch, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude);
+                  matches = fsGrep(resolvedSearch, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude, limit);
                 } else {
                   const mode = detectGrepMode(args.pattern);
                   const baseOpts = {
@@ -507,8 +510,8 @@ export default async (input) => {
                 // Failsafe: if fff returned nothing (or results were all filtered out),
                 // try filesystem-level grep as a fallback (handles fff tokenization gaps)
                 if (matches.length === 0) {
-                  const fallbackDir = join(directory, args.path || "");
-                  matches = fsGrep(fallbackDir, directory, args.pattern, ctxLines, null, args.include, args.exclude);
+                  const fallbackDir = resolvePath(directory, args.path);
+                  matches = fsGrep(fallbackDir, directory, args.pattern, ctxLines, null, args.include, args.exclude, limit);
                 }
               }
             }
