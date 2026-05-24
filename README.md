@@ -97,7 +97,7 @@ Four search paths, selected automatically:
 
 **Smart case**: Lowercase patterns are case-insensitive. Uppercase or mixed-case patterns are case-sensitive. Matches ripgrep `--smart-case` behavior. Explicit `caseSensitive` parameter overrides this.
 
-Results sorted by mtime, limited to configurable count (default 100, max 5000).
+Results are frecency-ranked by fff (most recently/frequently used first). Limited to configurable count (default 100, max 5000).
 
 ### `glob` Tool
 
@@ -107,13 +107,13 @@ Results sorted by mtime, limited to configurable count (default 100, max 5000).
 | Fuzzy query (no metacharacters) | fff's `fileSearch` / `directorySearch` → `globWalk` augmentation if no exact match |
 
 - Items from fff are normalized (both `relativePath` and `fileName` always present)
-- `type="directory"` uses `finder.directorySearch()` + `globWalk` fallback
+- `type="directory"` with glob metacharacters (`*`, `?`, `[`) routes directly to `globWalk` (fff's `directorySearch` is fuzzy, not glob-aware). Without metacharacters, `finder.directorySearch()` is used instead.
 - Output is absolute paths (matching OpenCode upstream behavior)
 - For non-metachar patterns (e.g., `temp.ts`), fff returns fuzzy matches. If no result has an exact basename match, `globWalk` runs to find the real file and augment results
 
 ### TUI Rendering
 
-Both tools return `{ output, metadata }` so OpenCode's TUI displays match counts inline.
+Both tools return `{ output, metadata }` so OpenCode's TUI displays match counts inline. Note: `grep` uses `metadata.matches` while `glob` uses `metadata.count`.
 
 ### Exclude Filter
 
@@ -124,7 +124,7 @@ Matches against both `relativePath` and `fileName` because `minimatch("dir/Foo.v
 The plugin respects `.gitignore` at two levels:
 
 1. **fff's index** — respects `.gitignore` natively via the Rust `ignore` crate (same library ripgrep uses). Files in `node_modules/`, `dist/`, etc. are never indexed.
-2. **Filesystem fallbacks** (`fsGrep`, `globWalk`) — parse `.gitignore` from disk at startup and augment a hardcoded skip list. Simple directory-name patterns (e.g., `vendor/`, `generated/`) are extracted and added to the skip set automatically.
+2. **Filesystem fallbacks** (`fsGrep`, `globWalk`) — parse `.gitignore` from disk lazily (on first use) and augment a hardcoded skip list. Results are cached per workspace root. Simple directory-name patterns (e.g., `vendor/`, `generated/`) are extracted and added to the skip set automatically.
 
 Hardcoded baseline (used when no `.gitignore` exists):
 
@@ -173,7 +173,7 @@ Fast content search with full-text matching.
 
 **Output format:** `relativePath:lineNumber:lineContent` (one line per match). When `context > 0`, context lines before/after each match are included with their correct line numbers.
 
-Default limit 100, max 5000. Results sorted by modification time (newest first).
+Default limit 100, max 5000. Results are frecency-ranked by fff (most recently/frequently used first).
 
 **Single-file mode:** When `path` points to a file (not a directory), the plugin reads the file directly, bypassing fff's index. This guarantees 100% recall for file-specific searches.
 
@@ -203,6 +203,8 @@ On a 48K-file repo (nodejs/node):
 | Single grep | ~45ms | ~15ms |
 | Single glob | ~3ms | ~6ms (glob walk) / ~2ms (fuzzy) |
 | 100 grep searches | ~5min | <1s |
+
+> Benchmarks observed in local development; not produced by automated test assertions. Performance will vary by repo size and hardware.
 
 ## Platform-Specific Notes
 
