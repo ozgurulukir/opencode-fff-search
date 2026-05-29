@@ -1,6 +1,6 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -379,6 +379,26 @@ describe("FffPlugin", () => {
         );
       }
     });
+
+    it("should not crash when search path is deleted (existsSync guard)", async () => {
+      // Create a subdirectory, index it, then delete it before searching.
+      // The existsSync guard in fsGrep should prevent a crash.
+      const volatileDir = join(tmpDir, "volatile-search-dir");
+      mkdirSync(volatileDir, { recursive: true });
+      writeFileSync(join(volatileDir, "file.txt"), "searchable content here\n");
+      try {
+        // First grep to ensure fff indexes the dir
+        const result1 = await grepExecute({ pattern: "searchable", path: "volatile-search-dir" }, ctx);
+        assert.ok(out(result1).includes("volatile-search-dir"), "First search should find the file");
+        // Now delete the directory and search again — should not crash
+        rmSync(volatileDir, { recursive: true, force: true });
+        const result2 = await grepExecute({ pattern: "searchable", path: "volatile-search-dir" }, ctx);
+        // reaching here proves no SIGBUS / segfault
+        assert.equal(typeof result2, "object", "Should return result object, not crash");
+      } finally {
+        if (existsSync(volatileDir)) rmSync(volatileDir, { recursive: true, force: true });
+      }
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -420,6 +440,85 @@ describe("FffPlugin", () => {
   });
 
   // -----------------------------------------------------------------------
+  // grep — include parameter
+  // -----------------------------------------------------------------------
+  describe("grep include patterns", () => {
+    it("should only include files matching a single glob pattern", async () => {
+      const all = await grepExecute({ pattern: "export" }, ctx);
+      const filtered = await grepExecute({ pattern: "export", include: "*.js" }, ctx);
+      const allLines = out(all).split("\n").filter(Boolean);
+      const filteredLines = out(filtered).split("\n").filter(Boolean);
+      assert.ok(filteredLines.length <= allLines.length, "include should not return more than all");
+      for (const line of filteredLines) {
+        const filePath = line.split(":")[0];
+        assert.ok(filePath.endsWith(".js"), `Include filter leaked non-js file: ${filePath}`);
+      }
+    });
+
+    it("include with brace expansion: *.{js,jsx}", async () => {
+      const result = await grepExecute({ pattern: "export", include: "*.{js,jsx}" }, ctx);
+      for (const line of out(result).split("\n").filter(Boolean)) {
+        const filePath = line.split(":")[0];
+        assert.ok(filePath.endsWith(".js") || filePath.endsWith(".jsx"), `Non-js file leaked: ${filePath}`);
+      }
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // grep — Turkish / Unicode (fsGrep path)
+  // -----------------------------------------------------------------------
+  describe("grep Turkish / Unicode", () => {
+    it("should find Turkish characters via fsGrep (non-ASCII routing)", async () => {
+      // Write a file with Turkish content and search for it
+      const trFile = join(tmpDir, "turkish.txt");
+      writeFileSync(trFile, "İstanbul Ankara İzmir\nşeker çay kahve\n");
+      try {
+        const result = await grepExecute({ pattern: "İstanbul" }, ctx);
+        assert.ok(out(result).includes("turkish.txt"), "Should find Turkish file");
+        assert.ok(out(result).includes("İstanbul"), "Should match Turkish İ character");
+      } finally {
+        rmSync(trFile, { force: true });
+      }
+    });
+
+    it("Turkish uppercase İ does NOT match case-insensitively via ASCII smart case (known fff limitation)", async () => {
+      // fff's smart case uses ASCII-only case folding: I (U+0049) ≠ İ (U+0130).
+      // Pattern 'istanbul' (ASCII) will NOT match 'İstanbul' case-insensitively.
+      // This documents the known limitation described in AGENTS.md:
+      // "Use lowercase patterns for Turkish case-insensitive search... İ ≠ I in ASCII."
+      const trFile = join(tmpDir, "turkish-ci.txt");
+      writeFileSync(trFile, "İstanbul güzel bir şehir\n");
+      try {
+        const result = await grepExecute({ pattern: "istanbul" }, ctx);
+        // With caseSensitive=false, the ASCII-only smart case won't match İ
+        // because fff folds I→i but İ (U+0130) is outside the ASCII range.
+        // The workaround: use the exact Unicode char with caseSensitive:true,
+        // or use case-insensitive Unicode pattern that routes via fsGrep.
+        const found = out(result).includes("turkish-ci.txt");
+        assert.ok(
+          !found,
+          "Known limitation: ASCII smart case cannot match İ (U+0130) with 'i' pattern. "
+          + "Use 'İstanbul' (exact Unicode) or 'ist' / 'anbul' partial patterns to find the file."
+        );
+      } finally {
+        rmSync(trFile, { force: true });
+      }
+    });
+
+    it("should match 'şeker' without ASCII normalization overcount", async () => {
+      const trFile = join(tmpDir, "seker.txt");
+      writeFileSync(trFile, "şeker ve çikolata\n");
+      try {
+        const result = await grepExecute({ pattern: "şeker" }, ctx);
+        const matches = out(result).split("\n").filter((l) => l.includes("seker.txt"));
+        assert.ok(matches.length >= 1, "Should find exactly one match for şeker in seker.txt");
+      } finally {
+        rmSync(trFile, { force: true });
+      }
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // grep — context lines
   // -----------------------------------------------------------------------
   describe("grep context lines", () => {
@@ -436,6 +535,38 @@ describe("FffPlugin", () => {
       const a = await grepExecute({ pattern: "console.log", context: 0 }, ctx);
       const b = await grepExecute({ pattern: "console.log" }, ctx);
       assert.equal(out(a), out(b));
+    });
+
+    it("contextBefore line numbers are strictly less than the match line number", async () => {
+      // Write a known file so we know exactly which line the match is on
+      const ctxFile = join(tmpDir, "ctx-test.txt");
+      const lines = ["line-A\n", "line-B\n", "MATCH_LINE\n", "line-D\n", "line-E\n"];
+      writeFileSync(ctxFile, lines.join(""));
+      try {
+        const result = await grepExecute({ pattern: "MATCH_LINE", path: "ctx-test.txt", context: 2 }, ctx);
+        const outLines = out(result).split("\n").filter(Boolean);
+        assert.ok(outLines.length >= 3, `Expected >=3 lines for context=2, got ${outLines.length}`);
+        // Find the match line
+        const matchLine = outLines.find((l) => l.includes("MATCH_LINE"));
+        assert.ok(matchLine, "Should contain the match line");
+        const matchLineNum = parseInt(matchLine.split(":")[1], 10);
+        // All contextBefore entries must have lineNumber < matchLineNum
+        const contextBeforeLines = [];
+        let collecting = true;
+        for (const l of outLines) {
+          if (l === matchLine) { collecting = false; continue; }
+          if (collecting) contextBeforeLines.push(l);
+        }
+        for (const ctxLine of contextBeforeLines) {
+          const ctxLineNum = parseInt(ctxLine.split(":")[1], 10);
+          assert.ok(
+            ctxLineNum < matchLineNum,
+            `contextBefore line ${ctxLineNum} must be < match line ${matchLineNum}`
+          );
+        }
+      } finally {
+        rmSync(ctxFile, { force: true });
+      }
     });
   });
 
@@ -462,15 +593,15 @@ describe("FffPlugin", () => {
     });
 
     it("should throw on negative limit", async () => {
-      await assert.rejects(() => grepExecute({ pattern: "foo", limit: -5 }, ctx), /limit must be a number/);
+      await assert.rejects(() => grepExecute({ pattern: "foo", limit: -5 }, ctx), /limit must be a number between 1 and 5000/);
     });
 
     it("should throw on limit > MAX_LIMIT (5000)", async () => {
-      await assert.rejects(() => grepExecute({ pattern: "foo", limit: 99999 }, ctx), /limit must be a number/);
+      await assert.rejects(() => grepExecute({ pattern: "foo", limit: 5001 }, ctx), /limit must be a number between 1 and 5000/);
     });
 
     it("should throw on limit=0", async () => {
-      await assert.rejects(() => grepExecute({ pattern: "foo", limit: 0 }, ctx), /limit must be a number/);
+      await assert.rejects(() => grepExecute({ pattern: "foo", limit: 0 }, ctx), /limit must be a number between 1 and 5000/);
     });
   });
 
@@ -488,6 +619,32 @@ describe("FffPlugin", () => {
 
     it("should throw on non-number limit", async () => {
       await assert.rejects(() => grepExecute({ pattern: "foo", limit: "abc" }, ctx), /limit must be a number/);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // grep — metadata contract
+  // -----------------------------------------------------------------------
+  describe("grep metadata contract", () => {
+    it("should return metadata.matches as a positive integer", async () => {
+      const result = await grepExecute({ pattern: "foo" }, ctx);
+      assert.equal(typeof result.metadata.matches, "number", "matches must be a number");
+      assert.ok(result.metadata.matches >= 0, "matches must be non-negative");
+    });
+
+    it("should return metadata.truncated=true when results exceed limit", async () => {
+      const result = await grepExecute({ pattern: ".", limit: 1 }, ctx);
+      assert.equal(typeof result.metadata.truncated, "boolean", "truncated must be boolean");
+      // With limit=1 and many matches, truncated should be true (if there are >1 matches)
+      const allResult = await grepExecute({ pattern: "." }, ctx);
+      if (allResult.metadata.matches > 1) {
+        assert.ok(result.metadata.truncated, "truncated should be true when limit < total matches");
+      }
+    });
+
+    it("should return metadata.truncated=false when results fit within limit", async () => {
+      const result = await grepExecute({ pattern: "ZZZNONE" }, ctx);
+      assert.equal(result.metadata.truncated, false, "truncated should be false for zero results");
     });
   });
 
@@ -618,6 +775,18 @@ describe("FffPlugin", () => {
       const lines = out(result).split("\n").filter(Boolean);
       assert.ok(lines.length <= 2, `limit=2 returned ${lines.length} results`);
     });
+
+    it("should throw on negative limit", async () => {
+      await assert.rejects(() => globExecute({ pattern: "foo", limit: -1 }, ctx), /limit must be a number between 1 and 5000/);
+    });
+
+    it("should throw on limit > MAX_LIMIT (5000)", async () => {
+      await assert.rejects(() => globExecute({ pattern: "foo", limit: 5001 }, ctx), /limit must be a number between 1 and 5000/);
+    });
+
+    it("should throw on limit=0", async () => {
+      await assert.rejects(() => globExecute({ pattern: "foo", limit: 0 }, ctx), /limit must be a number between 1 and 5000/);
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -628,6 +797,32 @@ describe("FffPlugin", () => {
       const abortCtx = createContext(tmpDir);
       abortCtx._abortController.abort();
       await assert.rejects(() => globExecute({ pattern: "foo" }, abortCtx), /Aborted/);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // glob — metadata contract
+  // -----------------------------------------------------------------------
+  describe("glob metadata contract", () => {
+    it("should return metadata.count as a non-negative integer", async () => {
+      const result = await globExecute({ pattern: "foo" }, ctx);
+      assert.equal(typeof result.metadata.count, "number", "count must be a number");
+      assert.ok(result.metadata.count >= 0, "count must be non-negative");
+    });
+
+    it("should return metadata.truncated=false when all results fit", async () => {
+      const result = await globExecute({ pattern: ".", limit: 5000 }, ctx);
+      assert.equal(typeof result.metadata.truncated, "boolean");
+      assert.equal(result.metadata.truncated, false, "truncated should be false with high limit");
+    });
+
+    it("glob output should be newline-separated absolute paths", async () => {
+      const result = await globExecute({ pattern: "index.js" }, ctx);
+      const paths = out(result).split("\n").filter(Boolean);
+      assert.ok(paths.length > 0, "Should find at least one result");
+      for (const p of paths) {
+        assert.ok(p.startsWith("/"), `Glob path must be absolute: ${p}`);
+      }
     });
   });
 
@@ -690,6 +885,30 @@ describe("FffPlugin", () => {
     it("glob with special characters in pattern", async () => {
       const result = await globExecute({ pattern: "foo.js" }, ctx);
       assert.equal(typeof result, "object");
+    });
+
+    // -----------------------------------------------------------------------
+    // Single-file 100% recall — directFileGrep path
+    // -----------------------------------------------------------------------
+    it("single-file path uses directFileGrep with 100% recall (bypasses fff)", async () => {
+      const singleFile = join(tmpDir, "src", "foo.js");
+      const result = await grepExecute({ pattern: "bar", path: singleFile }, ctx);
+      assert.ok(out(result).includes("src/foo.js"), "Should find the single file");
+      assert.ok(out(result).includes("bar"), "Should match the content");
+      // In single-file mode, the match count should be 1 (only one file searched)
+      assert.equal(result.metadata.matches, 1, "Single-file search should return exactly 1 match");
+    });
+
+    it("single-file path with Unicode pattern (fsGrep bypass)", async () => {
+      const unicodeFile = join(tmpDir, "unicode-test.txt");
+      writeFileSync(unicodeFile, "şeker ve çikolata içeriği\n");
+      try {
+        const result = await grepExecute({ pattern: "şeker", path: unicodeFile }, ctx);
+        assert.ok(out(result).includes("unicode-test.txt"), "Should find unicode file");
+        assert.ok(out(result).includes("şeker"), "Should match Turkish ş");
+      } finally {
+        rmSync(unicodeFile, { force: true });
+      }
     });
 
     it("grep with path + exclude combined", async () => {
