@@ -3,6 +3,7 @@ import { FileFinder } from "@ff-labs/fff-node";
 import { minimatch } from "minimatch";
 import { join, relative, isAbsolute } from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
+import { promises as fsPromises } from "node:fs";
 
 // Module-level constants
 const TRAILING_SLASH_RE = /\/+$/;
@@ -217,11 +218,11 @@ async function safeLog(client, level, message) {
  * Grep a single file by reading it directly (100% recall, bypasses fff).
  * Handles Unicode patterns correctly (uses regex `u` flag).
  */
-function directFileGrep(filePath, basePath, pattern, ctxLines) {
+async function directFileGrep(filePath, basePath, pattern, ctxLines) {
   const rel = relative(basePath, filePath);
   const fileName = rel.split("/").pop();
   let content;
-  try { content = readFileSync(filePath, "utf8"); } catch { return []; }
+  try { content = await fsPromises.readFile(filePath, "utf8"); } catch { return []; }
   const lines = content.split("\n");
   const results = [];
   let re;
@@ -253,7 +254,74 @@ function directFileGrep(filePath, basePath, pattern, ctxLines) {
  * them correctly due to Unicode normalization causing overcounting).
  * Walks the directory tree respecting SKIP_DIRS, applies path/include/exclude.
  */
-function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, limit) {
+
+/**
+ * Shared helper to determine if a file should be included based on include/exclude patterns.
+ */
+function shouldIncludeFile(relativePath, fileName, include, exclude) {
+  if (include) {
+    const patterns = include.split(",").map((p) => p.trim()).filter(Boolean);
+    if (patterns.length > 0) {
+      const matches = patterns.some((pat) =>
+        minimatch(fileName, pat, { dot: true }) ||
+        minimatch(relativePath, pat, { dot: true })
+      );
+      if (!matches) return false;
+    }
+  }
+  if (exclude) {
+    const patterns = exclude.split(",").map((p) => p.trim()).filter(Boolean);
+    if (patterns.length > 0) {
+      const excluded = patterns.some((pat) =>
+        minimatch(fileName, pat, { dot: true }) ||
+        minimatch(relativePath, pat, { dot: true }) ||
+        relativePath.split("/").some((part) => minimatch(part, pat, { dot: true }))
+      );
+      if (excluded) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Shared helper to apply minimatch filtering to an array of items.
+ */
+function applyMinimatchFilter(items, include, exclude) {
+  if (!include && !exclude) return items;
+  return items.filter((m) => shouldIncludeFile(m.relativePath, m.fileName, include, exclude));
+}
+
+
+/**
+ * Shared helper to read a file and grep its lines.
+ */
+async function searchInFile(fullPath, rel, entryName, re, ctxLines, limit, results, state) {
+  let content;
+  try { content = await fsPromises.readFile(fullPath, "utf8"); } catch { return false; }
+  state.filesRead++;
+  const lines = content.split("\n");
+  if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep testing file:', rel, 'lines:', lines.length);
+  for (let i = 0; i < lines.length; i++) {
+    re.lastIndex = 0;
+    if (re.test(lines[i])) {
+      state.linesTested++;
+      results.push({
+        relativePath: rel,
+        fileName: entryName,
+        lineNumber: i + 1,
+        lineContent: lines[i],
+        contextBefore: ctxLines > 0 ? lines.slice(Math.max(0, i - ctxLines), i) : undefined,
+        contextAfter: ctxLines > 0 ? lines.slice(i + 1, i + 1 + ctxLines) : undefined,
+      });
+      if (limit && results.length >= limit) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, limit) {
   if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep called:', { dir: dir?.substring(0, 80), basePath: basePath?.substring(0, 80), pattern, hasPathFilter: !!pathFilter, include, exclude, limit });
   const hasUpper = /[A-Z]/.test(pattern);
   const shouldSkip = loadGitignoreFilter(basePath);
@@ -265,12 +333,11 @@ function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, 
   }
   const results = [];
   const stack = [dir];
-  let filesRead = 0;
-  let linesTested = 0;
+  const state = { filesRead: 0, linesTested: 0 };
   while (stack.length > 0) {
     const current = stack.pop();
     let entries;
-    try { entries = readdirSync(current, { withFileTypes: true }); } catch (e) { 
+    try { entries = await fsPromises.readdir(current, { withFileTypes: true }); } catch (e) {
       if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep readdirSync error:', current, e.message);
       continue; 
     }
@@ -287,47 +354,13 @@ function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, 
       const rel = relative(basePath, fullPath);
       // Apply path filter
       if (pathFilter && !filterByPath([{ relativePath: rel }], "relativePath", pathFilter).length) continue;
-      // Apply include filter (match basename + full path)
-      if (include) {
-        const patterns = include.split(",").map((p) => p.trim()).filter(Boolean);
-        const matches = patterns.some((pat) =>
-          minimatch(entry.name, pat, { dot: true }) ||
-          minimatch(rel, pat, { dot: true })
-        );
-        if (!matches) continue;
-      }
-      // Apply exclude filter
-      if (exclude) {
-        const patterns = exclude.split(",").map((p) => p.trim()).filter(Boolean);
-        const excluded = patterns.some((pat) =>
-          minimatch(entry.name, pat, { dot: true }) ||
-          minimatch(rel, pat, { dot: true }) ||
-          rel.split("/").some((part) => minimatch(part, pat, { dot: true }))
-        );
-        if (excluded) continue;
-      }
+      // Apply include/exclude filters
+      if (!shouldIncludeFile(rel, entry.name, include, exclude)) continue;
+
       // Read and grep
-      let content;
-      try { content = readFileSync(fullPath, "utf8"); } catch { continue; }
-      filesRead++;
-      const lines = content.split("\n");
-      if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep testing file:', rel, 'lines:', lines.length);
-      for (let i = 0; i < lines.length; i++) {
-        re.lastIndex = 0;
-        if (re.test(lines[i])) {
-          linesTested++;
-          results.push({
-            relativePath: rel,
-            fileName: entry.name,
-            lineNumber: i + 1,
-            lineContent: lines[i],
-            contextBefore: ctxLines > 0 ? lines.slice(Math.max(0, i - ctxLines), i) : undefined,
-            contextAfter: ctxLines > 0 ? lines.slice(i + 1, i + 1 + ctxLines) : undefined,
-          });
-          if (limit && results.length >= limit) {
-            return results;
-          }
-        }
+      const limitReached = await searchInFile(fullPath, rel, entry.name, re, ctxLines, limit, results, state);
+      if (limitReached) {
+        return results;
       }
     }
   }
@@ -340,14 +373,14 @@ function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, 
  * Returns items with `relativePath` and `fileName` fields (same shape as fff).
  * Handles Turkish/Unicode filenames correctly (operates at filesystem level).
  */
-function globWalk(dir, pattern, basePath, limit, type) {
+async function globWalk(dir, pattern, basePath, limit, type) {
   const shouldSkip = loadGitignoreFilter(basePath);
   const results = [];
   const stack = [dir];
   while (stack.length > 0) {
     const current = stack.pop();
     let entries;
-    try { entries = readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    try { entries = await fsPromises.readdir(current, { withFileTypes: true }); } catch { continue; }
     for (const entry of entries) {
       const fullPath = join(current, entry.name);
       const rel = relative(basePath, fullPath);
@@ -362,11 +395,10 @@ function globWalk(dir, pattern, basePath, limit, type) {
           if (dirMatch) {
             results.push({ relativePath: rel, fileName: entry.name });
             if (results.length >= limit) return results;
-    }
-  }
-  if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep done:', { dir: dir?.substring(0, 80), pattern, filesRead, linesTested, results: results.length });
-  return results;
-}
+          }
+        }
+        continue;
+      }
       if (!entry.isFile()) continue;
       if (type === "directory") continue;
       if (minimatch(rel, pattern, { dot: true })) {
@@ -466,7 +498,7 @@ export default async (input) => {
 
             if (resolvedFilePath) {
               // Single-file: direct Node.js read for 100% recall
-              matches = directFileGrep(resolvedFilePath, directory, args.pattern, ctxLines);
+              matches = await directFileGrep(resolvedFilePath, directory, args.pattern, ctxLines);
             } else {
               // Directory search: check for non-ASCII (Unicode) patterns
               hasNonAscii = /[^\x00-\x7F]/.test(args.pattern);
@@ -478,7 +510,7 @@ export default async (input) => {
                 const pathRel = args.path
                   ? (isAbsolute(args.path) ? relative(directory, args.path) : args.path)
                   : null;
-                matches = fsGrep(searchDir, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude, limit);
+                matches = await fsGrep(searchDir, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude, limit);
               } else {
                 // ASCII patterns: use fff's indexed search
                 // If path is outside the indexed directory, fall back to fsGrep
@@ -488,7 +520,7 @@ export default async (input) => {
                 const isOutsideIndex = args.path && !resolvedSearch.startsWith(directory + "/") && resolvedSearch !== directory;
                 if (isOutsideIndex) {
                   const pathRel = isAbsolute(args.path) ? relative(directory, args.path) : args.path;
-                  matches = fsGrep(resolvedSearch, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude, limit);
+                  matches = await fsGrep(resolvedSearch, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude, limit);
                 } else {
                   if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fff routing, pattern:', args.pattern, 'directory:', directory.substring(0, 50));
                   const mode = detectGrepMode(args.pattern);
@@ -525,35 +557,16 @@ export default async (input) => {
                     : args.path;
                   matches = filterByPath(matches, "relativePath", relativeTarget);
                 }
-                // Post-filter by include (only for fff results — fsGrep pre-filters)
-                // Check both relativePath AND fileName because minimatch("dir/file.vue", "*.vue") is false
-                if (args.include) {
-                  const patterns = args.include.split(",").map((p) => p.trim()).filter(Boolean);
-                  matches = matches.filter((m) =>
-                    patterns.some((pat) =>
-                      minimatch(m.relativePath, pat, { dot: true }) ||
-                      minimatch(m.fileName, pat, { dot: true })
-                    )
-                  );
-                }
-                // Post-filter by exclude (only for fff results — fsGrep pre-filters)
-                // Check both relativePath AND fileName because minimatch("dir/file.vue", "*.vue") is false
-                if (args.exclude) {
-                  const patterns = args.exclude.split(",").map((p) => p.trim()).filter(Boolean);
-                  matches = matches.filter((m) =>
-                    !patterns.some((pat) =>
-                      minimatch(m.relativePath, pat, { dot: true }) ||
-                      minimatch(m.fileName, pat, { dot: true })
-                    )
-                  );
-                }
+                // Post-filter by include/exclude (only for fff results — fsGrep pre-filters)
+                matches = applyMinimatchFilter(matches, args.include, args.exclude);
+
                  // Failsafe: if fff returned nothing (or results were all filtered out),
                  // try filesystem-level grep as a fallback (handles fff tokenization gaps)
                  if (matches.length === 0) {
                    const fallbackDir = resolvePath(directory, args.path);
                    if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep failsafe, pattern:', args.pattern, 'fallbackDir:', fallbackDir);
                    if (existsSync(fallbackDir)) {
-                     matches = fsGrep(fallbackDir, directory, args.pattern, ctxLines, null, args.include, args.exclude, limit);
+                     matches = await fsGrep(fallbackDir, directory, args.pattern, ctxLines, null, args.include, args.exclude, limit);
                      if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep got', matches.length, 'matches');
                    } else if (process.env.DEBUG_GREP) {
                      console.error('[GREP-DEBUG] fsGrep failsafe skipped — fallbackDir does not exist:', fallbackDir);
@@ -634,7 +647,7 @@ export default async (input) => {
             // directorySearch is fuzzy, not glob-aware) and use globWalk directly.
             if (args.type === "directory" && isMetachar) {
               const walkLimit = Math.max(userLimit, 100);
-              items = globWalk(searchDir, args.pattern, directory, walkLimit, "directory");
+              items = await globWalk(searchDir, args.pattern, directory, walkLimit, "directory");
             } else if (args.type === "directory") {
               const dirResult = finder.directorySearch(args.pattern, { pageSize });
               if (!dirResult.ok) throw new Error(`fff dirSearch error: ${dirResult.error}`);
@@ -687,12 +700,12 @@ export default async (input) => {
             if (items.length === 0) {
               const walkLimit = Math.max(userLimit, 100);
               const targetType = args.type || "file";
-              items = globWalk(searchDir, args.pattern, directory, walkLimit, targetType);
+              items = await globWalk(searchDir, args.pattern, directory, walkLimit, targetType);
             } else if (!isMetachar && !items.some((item) => item.fileName === args.pattern)) {
               // Fuzzy results don't include the exact file — augment with globWalk
               const walkLimit = Math.max(userLimit, 100);
               const targetType = args.type || "file";
-              const walkResults = globWalk(searchDir, args.pattern, directory, walkLimit, targetType);
+              const walkResults = await globWalk(searchDir, args.pattern, directory, walkLimit, targetType);
               const existing = new Set(items.map((item) => item.relativePath));
               for (const wr of walkResults) {
                 if (!existing.has(wr.relativePath)) {
