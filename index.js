@@ -395,11 +395,10 @@ async function globWalk(dir, pattern, basePath, limit, type) {
           if (dirMatch) {
             results.push({ relativePath: rel, fileName: entry.name });
             if (results.length >= limit) return results;
-    }
-  }
-  if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep done:', { dir: dir?.substring(0, 80), pattern, filesRead: state.filesRead, linesTested: state.linesTested, results: results.length });
-  return results;
-}
+          }
+        }
+        continue;
+      }
       if (!entry.isFile()) continue;
       if (type === "directory") continue;
       if (minimatch(rel, pattern, { dot: true })) {
