@@ -1,7 +1,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { FileFinder } from "@ff-labs/fff-node";
 import { minimatch } from "minimatch";
-import { join, relative, isAbsolute } from "node:path";
+import path, { join, relative, isAbsolute, normalize } from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { promises as fsPromises } from "node:fs";
 
@@ -57,18 +57,20 @@ function loadGitignoreFilter(basePath) {
 }
 const GLOB_METACHAR_RE = /[*?\[]/;
 
-// Regex: matches patterns that contain intentional regex syntax:
-// \s, \d, \w, \b, \n, \t (escaped character classes)
-// \\ (literal backslash in pattern → regex escape intent)
-// | (alternation: import|export)
-// [abc] (character classes)
-// \+ (quantifier: one or more)
-// \* (quantifier: zero or more)
-// \? (quantifier: optional)
-// ^ or $ (anchors)
-//
-// Parentheses (), dots ., commas , and other symbols that appear in normal
-// code are NOT treated as regex triggers — they are sent via plain mode.
+/**
+ * Regex: matches patterns that contain intentional regex syntax:
+ * \s, \d, \w, \b, \n, \t (escaped character classes)
+ * \\ (literal backslash in pattern → regex escape intent)
+ * | (alternation: import|export)
+ * [abc] (character classes)
+ * \+ (quantifier: one or more)
+ * \* (quantifier: zero or more)
+ * \? (quantifier: optional)
+ * ^ or $ (anchors)
+ *
+ * Parentheses (), dots ., commas , and other symbols that appear in normal
+ * code are NOT treated as regex triggers — they are sent via plain mode.
+ */
 const REGEX_METACHAR_RE = /\\[sdwnbtDSWNBT]|\\|\||\[\^?\]|\[\^?[^\]]+\]|\\\+|\\\*|\\\?|[\^\$]/;
 
 /**
@@ -82,6 +84,7 @@ const REGEX_METACHAR_RE = /\\[sdwnbtDSWNBT]|\\|\||\[\^?\]|\[\^?[^\]]+\]|\\\+|\\\
  * are sent as plain so they match the actual file contents.
  */
 function detectGrepMode(pattern) {
+  if (!pattern || typeof pattern !== "string") return "plain";
   return REGEX_METACHAR_RE.test(pattern) ? "regex" : "plain";
 }
 
@@ -100,11 +103,18 @@ function filterByPath(items, pathKey, targetPath) {
   });
 }
 
-/** Resolve path: absolute → as-is, relative → join with workspace dir, falsy → workspace dir. */
+/** Resolve path: absolute → as-is, relative → join with workspace dir, falsy → workspace dir.
+ *  Includes path traversal protection. */
 function resolvePath(directory, p) {
-  if (!p) return directory;
-  if (isAbsolute(p)) return p;
-  return join(directory, p);
+  if (!p) return path.resolve(directory);
+  const resolved = path.resolve(directory, p);
+  const dirResolved = path.resolve(directory);
+  // Ensure the trailing slash for accurate startsWith check if not exact match
+  const prefix = dirResolved.endsWith(path.sep) ? dirResolved : dirResolved + path.sep;
+  if (resolved !== dirResolved && !resolved.startsWith(prefix)) {
+    throw new Error(`Path is outside the workspace directory: ${resolved} vs ${dirResolved}`);
+  }
+  return resolved;
 }
 
 /**
@@ -219,6 +229,8 @@ async function safeLog(client, level, message) {
  * Handles Unicode patterns correctly (uses regex `u` flag).
  */
 async function directFileGrep(filePath, basePath, pattern, ctxLines) {
+  // Enforce path traversal protection before reading the file
+  filePath = resolvePath(basePath, filePath);
   const rel = relative(basePath, filePath);
   const fileName = rel.split("/").pop();
   let content;
@@ -227,6 +239,8 @@ async function directFileGrep(filePath, basePath, pattern, ctxLines) {
   const results = [];
   let re;
   try {
+    // ReDoS mitigation: Cap pattern length before regex compilation
+    if (pattern && pattern.length > 200) pattern = pattern.slice(0, 200);
     const hasUpper = /[A-Z]/.test(pattern);
     re = new RegExp(pattern, hasUpper ? "gu" : "giu");
   } catch {
@@ -323,6 +337,8 @@ async function searchInFile(fullPath, rel, entryName, re, ctxLines, limit, resul
 
 async function fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, limit) {
   if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep called:', { dir: dir?.substring(0, 80), basePath: basePath?.substring(0, 80), pattern, hasPathFilter: !!pathFilter, include, exclude, limit });
+  // ReDoS mitigation: Cap pattern length before regex compilation
+  if (pattern && pattern.length > 200) pattern = pattern.slice(0, 200);
   const hasUpper = /[A-Z]/.test(pattern);
   const shouldSkip = loadGitignoreFilter(basePath);
   let re;
@@ -411,6 +427,102 @@ async function globWalk(dir, pattern, basePath, limit, type) {
 }
 // Module-level instance cache to prevent leaking native resources (watcher threads,
 // mmap handles). Only one FileFinder per directory is allowed.
+async function performGrepRouting(directory, finder, client, args, ctxLines, limit, context) {
+  let resolvedFilePath = null;
+  let hasNonAscii = false;
+  if (args.path) {
+    const resolvedPath = isAbsolute(args.path) ? args.path : join(directory, args.path);
+    try {
+      if (existsSync(resolvedPath) && statSync(resolvedPath).isFile()) {
+        resolvedFilePath = resolvedPath;
+      }
+    } catch { /* treat as directory */ }
+  }
+
+  let matches = [];
+  let regexFallbackError = null;
+
+  if (resolvedFilePath) {
+    // Single-file: direct Node.js read for 100% recall
+    matches = await directFileGrep(resolvedFilePath, directory, args.pattern, ctxLines);
+  } else {
+    // Directory search: check for non-ASCII (Unicode) patterns
+    hasNonAscii = /[^\x00-\x7F]/.test(args.pattern);
+    if (hasNonAscii) {
+      // Unicode patterns: fs-based search (fff normalizes ş↔s causing overcount)
+      const searchDir = isAbsolute(args.path || "")
+        ? args.path
+        : join(directory, args.path || "");
+      const pathRel = args.path
+        ? (isAbsolute(args.path) ? relative(directory, args.path) : args.path)
+        : null;
+      matches = await fsGrep(searchDir, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude, limit);
+    } else {
+      // ASCII patterns: use fff's indexed search
+      // If path is outside the indexed directory, fall back to fsGrep
+      const resolvedSearch = isAbsolute(args.path || "")
+        ? args.path
+        : join(directory, args.path || "");
+      const isOutsideIndex = args.path && !resolvedSearch.startsWith(directory + "/") && resolvedSearch !== directory;
+      if (isOutsideIndex) {
+        const pathRel = isAbsolute(args.path) ? relative(directory, args.path) : args.path;
+        matches = await fsGrep(resolvedSearch, directory, args.pattern, ctxLines, pathRel, args.include, args.exclude, limit);
+      } else {
+        if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fff routing, pattern:', args.pattern, 'directory:', directory.substring(0, 50));
+        const mode = detectGrepMode(args.pattern);
+        const baseOpts = {
+          mode,
+          smartCase: args.caseSensitive !== true,
+          beforeContext: ctxLines,
+          afterContext: ctxLines,
+          maxMatchesPerFile: limit,
+        };
+        const result = await fetchGrepPages(
+          finder, args.pattern, baseOpts, limit, context.abort.signal, client
+        );
+        matches = result.items;
+        regexFallbackError = result.regexFallbackError;
+
+        // Failsafe: if plain mode returned nothing but the pattern had
+        // metacharacters that plain can't handle, retry with regex.
+        if (matches.length === 0 && mode === "plain") {
+          const retryOpts = { ...baseOpts, mode: "regex" };
+          const retry = await fetchGrepPages(
+            finder, args.pattern, retryOpts, limit, context.abort.signal, client
+          );
+          if (retry.items.length > 0) {
+            matches = retry.items;
+            regexFallbackError = retry.regexFallbackError;
+          }
+        }
+      }
+      // Post-filter by path (only for fff results — fsGrep pre-filters)
+      if (args.path) {
+        const relativeTarget = isAbsolute(args.path)
+          ? relative(directory, args.path)
+          : args.path;
+        matches = filterByPath(matches, "relativePath", relativeTarget);
+      }
+      // Post-filter by include/exclude (only for fff results — fsGrep pre-filters)
+      matches = applyMinimatchFilter(matches, args.include, args.exclude);
+
+      // Failsafe: if fff returned nothing (or results were all filtered out),
+      // try filesystem-level grep as a fallback (handles fff tokenization gaps)
+      if (matches.length === 0) {
+        const fallbackDir = resolvePath(directory, args.path);
+        if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep failsafe, pattern:', args.pattern, 'fallbackDir:', fallbackDir);
+        if (existsSync(fallbackDir)) {
+          matches = await fsGrep(fallbackDir, directory, args.pattern, ctxLines, null, args.include, args.exclude, limit);
+          if (process.env.DEBUG_GREP) console.error('[GREP-DEBUG] fsGrep got', matches.length, 'matches');
+        } else if (process.env.DEBUG_GREP) {
+          console.error('[GREP-DEBUG] fsGrep failsafe skipped — fallbackDir does not exist:', fallbackDir);
+        }
+      }
+    }
+  }
+  return { matches, regexFallbackError };
+}
+
 const instances = new Map();
 
 /**
@@ -744,4 +856,15 @@ export default async (input) => {
       }),
     },
   };
+};
+
+// Export internals for testing
+export {
+  loadGitignoreFilter,
+  detectGrepMode,
+  filterByPath,
+  resolvePath,
+  directFileGrep,
+  fsGrep,
+  globWalk
 };
