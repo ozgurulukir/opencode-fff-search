@@ -10,7 +10,7 @@ OpenCode plugin that replaces OpenCode's built-in `grep` and `glob` file search 
 - Single-file ES module plugin (`index.js`)
 - No build step required
 - Node.js 18+ required (ES modules)
-- Uses `@ff-labs/fff-node` ^0.7.0 (Rust-based fast search) and `minimatch` for glob matching
+- Uses `@ff-labs/fff-node` (Node.js) or `@ff-labs/fff-bun` (Bun runtime) with auto-detection, plus `minimatch` for glob matching
 - Returns `{ output, metadata }` objects so OpenCode's TUI renders match counts inline
 - **Full feature set** — grep (pattern, path, include, exclude, caseSensitive, context, limit), glob (pattern, path, type, limit)
 - **Single-file 100% recall** — When path points to a file, reads it directly bypassing fff index
@@ -23,10 +23,11 @@ OpenCode plugin that replaces OpenCode's built-in `grep` and `glob` file search 
 
 The plugin exports an async default function `(input)` that:
 
-1. **Initializes** a `FileFinder` instance from `@ff-labs/fff-node` with safe defaults
-2. **Caches** one `FileFinder` per directory (module-level `instances` Map) to prevent native resource leaks
-3. **Creates a shared `scanPromise`** to avoid multiple concurrent index scans
-4. **Returns tool definitions** that override OpenCode's built-in `grep` and `glob` tools
+1. **Lazily imports** fff-native (`@ff-labs/fff-bun` or `@ff-labs/fff-node` via `lazyFff()`) at runtime — never at module level, avoiding Bun-on-Windows module-graph crashes
+2. **Initializes** a `FileFinder` instance with safe defaults; gracefully falls back to fs-only mode when `FileFinder.create()` returns `ok: false`
+3. **Caches** one `FileFinder` per directory (module-level `instances` Map) to prevent native resource leaks
+4. **Creates a shared `scanPromise`** to avoid multiple concurrent index scans
+5. **Returns tool definitions** that override OpenCode's built-in `grep` and `glob` tools
 
 ### Data Flow
 
@@ -56,7 +57,8 @@ glob:
 
 ### Key Components
 
-- `FileFinder.create({ basePath, ...config })` — Initializes fff search engine with aiMode enabled
+- `lazyFff(client)` — Lazily imports `@ff-labs/fff-bun` (Bun) or `@ff-labs/fff-node` (Node.js) at runtime, avoiding Bun-on-Windows module-graph crashes. Safe to call multiple times (idempotent).
+- `FileFinder.create({ basePath, ...config })` — Initializes fff search engine with aiMode enabled; gracefully falls back to fs-only mode when `ok: false`
 - `instances` Map — Module-level cache: one `{ finder, scanPromise }` per directory
 - `finder.waitForScan(15000)` — Waits for initial index build (15s timeout)
 - `detectGrepMode(pattern)` — Returns `"regex"` or `"plain"` based on regex metachar detection
@@ -71,6 +73,7 @@ glob:
 - `filterByExclude(items, exclude)` — Post-filter results by exclude glob pattern
 - `waitForScan(scanPromise, timeoutMs)` — Race between scan completion and timeout, never throws
 - `safeLog(client, level, message)` — Logging that never throws
+- `__test()` — Single function export that returns all internal functions for testing; prevents `getLegacyPlugins()` from calling each named export as a separate plugin server (Bun-on-Windows fix)
 
 ### Configuration
 
@@ -452,7 +455,7 @@ Automated test suite using `node:test` (zero external dependencies, Node.js 18+)
 node --test test/index.test.js
 ```
 
-85 unit tests across 24 suites covering initialization, tool shape, grep/glob behavior,
+112 unit tests across 24 suites covering initialization, tool shape, grep/glob behavior,
 path filtering, exclude filtering, context lines, limit, file-specific search,
 case sensitivity (smart case + explicit), regex mode, abort handling, pagination,
 stress tests, and edge cases.
@@ -565,6 +568,22 @@ slice panicked the binary.
 as of this writing.  Update `@ff-labs/fff-node` to `>=0.8.2` when it ships
 a crate version that backports this clamp.
 
+### `getLegacyPlugins()` calls every named export as a separate plugin server
+
+OpenCode's plugin loader calls `getLegacyPlugins(mod)` which iterates
+`Object.values(mod)` and invokes each function-valued export with
+`(input, options)` as if it were a standalone plugin `server()`.  When a named
+export like `fsGrep` or `loadGitignoreFilter` is called with `(input, options)`,
+the arguments are `PluginInput` (object) and plugin metadata (object), not the
+intended positional parameters.  This is harmless for most functions (they return
+early or catch), but under Bun-on-Windows, one such internal call triggers the
+`paths[1]` CJS interop bug during `require.resolve` deep within the Bun runtime.
+
+**Fix**: Replace individual named exports (`export { fsGrep, detectGrepMode, ... }`)
+with a single `export async function __test() {}` that returns an object containing
+all internal functions.  This way `getLegacyPlugins()` sees exactly one function
+export — `__test` — and calling it has no side effect.
+
 ## Common Gotchas
 
 1. **Return format**: Must return `{ output, metadata }` objects, not plain strings. TUI reads metadata for match counts.
@@ -586,12 +605,17 @@ a crate version that backports this clamp.
 17. **Pagination**: `fetchGrepPages` uses dynamic `maxPages = ceil(limit/50) + 2` instead of fixed `MAX_GREP_PAGES`. fff's `pageLimit` is hardcoded to 50 in `finder.ts` and not exposed via `GrepOptions`.
 18. **Context rendering**: When `context > 0`, the output loop renders `contextBefore` lines (with correct line numbers before the match), the match line itself, then `contextAfter` lines. Both fff grep items and `directFileGrep`/`fsGrep` items carry `contextBefore`/`contextAfter` arrays.
 19. **Test directory deletion can trigger a Rust panic**: `createTempProject()` internally calls `cleanupTempProject(tmpDir)` which deletes the shared test directory. If another test's `before()` hook then tries to rebuild that directory while the Rust overlay's `base_file_count()` is stale (higher than `files.len()`), calling `finder.grep()` inside `fetchGrepPages` will reach `files[overflow_start..]` with `overflow_start > files.len()` — a process-fatal slice panic (`grep.rs:2110`) that cannot be caught in JS. Workaround: never delete `tmpDir` from within a test. Use an isolated directory (e.g. `rmSync` a fresh unique path) so the shared test directory is untouched. The JS-side guards (`existsSync(fallbackDir)` in `fsGrep` failsafe, `totalFilesSearched === 0` retry in `fetchGrepPages`) reduce the blast radius but cannot prevent this specific panic.
+20. **Upstream (OpenCode/Bun) plugin loading bug — `"paths[1]" must be of type string, got object`**: When `package.json` in the plugin directory (e.g. `~/.config/opencode/`) lacks `"type": "module"`, Bun's internal CJS `require()` implementation throws `The "paths[1]" property must be of type string, got object` during dependency resolution. This is a Bun runtime bug — OpenCode's plugin loader (`packages/opencode/src/plugin/loader.ts`) calls `import(row.entry)` with no second argument and no `paths` option. The error originates from Bun's bundled `require.resolve` wrapper which receives an invalid `options.paths` array internally when the module type is ambiguous. **Root cause on Windows**: `@ff-labs/fff-node` depends on `ffi-rs` which uses CJS `require()` to load native `.node` addons — this triggers the Bun `paths[1]` bug on Windows. **Solution**: the plugin now detects Bun at runtime (`typeof Bun !== "undefined"`) and imports `@ff-labs/fff-bun` instead, which uses `bun:ffi` (`dlopen`) and has zero CJS dependencies. Under Node.js (tests), `@ff-labs/fff-node` is used.
+21. **Named exports trigger `getLegacyPlugins()` server calls**: OpenCode's `getLegacyPlugins(mod)` iterates `Object.values(mod)` and invokes each function-valued export as a separate plugin `server()`. Under Bun-on-Windows, calling an internal function like `fsGrep` or `loadGitignoreFilter` with `(PluginInput, options)` arguments triggers a `paths[1]` CJS interop crash inside Bun's `require.resolve`. **Fix**: Always wrap test-only internal exports under a single `export async function __test()` rather than individual named `export { ... }` blocks.
 
 ## Dependencies
 
 ### Runtime
-- `@ff-labs/fff-node` ^0.7.0 - Core search engine (Rust wrapper)
+- `@ff-labs/fff-node` ^0.8.1 - Core search engine for Node.js (Rust wrapper via `ffi-rs`)
+- `@ff-labs/fff-bun` ^0.8.4 - Core search engine for Bun runtime (uses `bun:ffi`, no CJS deps)
 - `minimatch` ^10.2.5 - Glob pattern matching for exclude parameter and `globWalk`
+
+The plugin auto-detects the runtime at load time using `typeof Bun !== "undefined"` and imports the appropriate package. Both are listed as dependencies so they're always available.
 
 ### Peer Dependencies
 - `@opencode-ai/plugin` ^1.14.28 - OpenCode plugin SDK
@@ -656,3 +680,4 @@ When modifying the plugin:
 - **mmap cache**: Enabled by default — faster searches via memory-mapped file cache
 - **File watcher**: Enabled by default — detects new/deleted files mid-session
 - **Recall**: ~90%+ for common tokens; inconsistent for edge cases. Single-file searches have 100% recall. Non-ASCII patterns and fff-zero fallback provide exact filesystem-level recall.
+- **Fallback**: When `FileFinder.create()` returns `ok:false`, the plugin operates in fs-only mode (no native fff index), using `globWalk` and `fsGrep` for all searches.

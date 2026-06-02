@@ -60,7 +60,30 @@ cd ~/.config/opencode && npm install
 
 ```bash
 git clone https://github.com/ozgurulukir/opencode-fff-search.git
-cd opencode-fff-search && ./install.sh
+cd opencode-fff-search && npm install
+
+# Run the test suite (112 tests)
+node --test test/index.test.js
+
+# Run session simulation tests
+node --test test/session-*.js
+
+# Test plugin loads
+node -e "import('./index.js').then(m => console.log('OK'))"
+```
+
+### Project structure
+
+```
+opencode-fff-search/
+├── index.js          # Single plugin file (ES module)
+├── package.json      # NPM package configuration
+├── test/
+│   ├── index.test.js                  # 112 unit tests
+│   └── ...                            # Stress, session, integration tests
+├── AGENTS.md         # Agent context documentation
+├── README.md         # This file
+└── LICENSE           # MIT License
 ```
 
 ## Configuration
@@ -211,6 +234,7 @@ On a 48K-file repo (nodejs/node):
 ### Windows
 - **WSL recommended** for best OpenCode experience
 - fff binary: `@ff-labs/fff-bin-win32-x64` (or `-arm64` for ARM)
+- Bun-on-Windows known issue resolved: internal functions now wrapped under a single `__test()` export to avoid the `getLegacyPlugins()` `paths[1]` CJS interop bug
 
 ### macOS
 - Works on both Intel (`x64`) and Apple Silicon (`arm64`)
@@ -262,7 +286,7 @@ fff's grep may not find matches in all files when searching directories. For 100
 git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search && npm install
 
-# Run the test suite (85 tests)
+# Run the test suite (112 tests)
 node --test test/index.test.js
 
 # Run session simulation tests
