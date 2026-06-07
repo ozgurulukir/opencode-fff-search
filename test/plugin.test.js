@@ -1,104 +1,23 @@
-import { describe, it, before, after, beforeEach } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import {
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+  existsSync,
+  chmodSync,
+} from "node:fs";
 import path, { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  createTempProject,
+  cleanupTempProject,
+  createMockClient,
+  createContext,
+  out,
+} from "./helpers.mjs";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function createTempProject() {
-  const tmpDir = join(__dirname, ".tmp-test-" + process.pid);
-  cleanupTempProject(tmpDir);
-  mkdirSync(tmpDir, { recursive: true });
-  mkdirSync(join(tmpDir, "src"), { recursive: true });
-  mkdirSync(join(tmpDir, "src/components"), { recursive: true });
-  mkdirSync(join(tmpDir, "docs"), { recursive: true });
-
-  writeFileSync(
-    join(tmpDir, "index.js"),
-    `import { foo } from "./src/foo.js";\nconsole.log(foo);\n`,
-  );
-  writeFileSync(
-    join(tmpDir, "README.md"),
-    `# Test Project\n\nThis is a test.\n`,
-  );
-  writeFileSync(
-    join(tmpDir, "src", "foo.js"),
-    `export const foo = "bar";\nexport const FOO = "UPPER";\n`,
-  );
-  writeFileSync(join(tmpDir, "src", "bar.js"), `// empty file\n`);
-  writeFileSync(
-    join(tmpDir, "src", "components", "App.jsx"),
-    `function App() { return <div>Hello</div>; }\nexport default App;\n`,
-  );
-  writeFileSync(join(tmpDir, "docs", "notes.txt"), `hello world\n`);
-  writeFileSync(join(tmpDir, ".gitignore"), `node_modules/\n.tmp*\n`);
-  writeFileSync(
-    join(tmpDir, "src", "case.js"),
-    `const lower = "abc";\nconst UPPER = "ABC";\nconst Mixed = "AbC";\n`,
-  );
-  writeFileSync(
-    join(tmpDir, "src", "metachars.js"),
-    `// contains literal regex metacharacters
-const parens = "foo(bar)";
-const bracket = "file[1].txt";
-const plus = "page+1";
-const dot = "example.com";
-`,
-  );
-
-  return tmpDir;
-}
-
-function cleanupTempProject(tmpDir) {
-  try {
-    rmSync(tmpDir, { recursive: true, force: true });
-  } catch {
-    // Best-effort
-  }
-}
-
-function createMockClient() {
-  const logs = [];
-  return {
-    logs,
-    client: {
-      app: {
-        log: async ({ body }) => logs.push(body),
-      },
-    },
-  };
-}
-
-function createContext(directory) {
-  const ac = new AbortController();
-  return {
-    sessionID: "test-session",
-    messageID: "test-msg",
-    agent: "test-agent",
-    directory,
-    worktree: directory,
-    abort: ac.signal,
-    metadata: () => {},
-    ask: () => {},
-    _abortController: ac,
-  };
-}
-
-// ---------------------------------------------------------------------------
-function out(result) {
-  return typeof result === "object" && result !== null && result.output != null
-    ? result.output
-    : result;
-}
-
-// Shared state — single plugin instance reused across all tests
-// ---------------------------------------------------------------------------
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let FffPlugin;
 let tmpDir;
@@ -118,10 +37,6 @@ before(async () => {
   globExecute = tool.glob.execute;
   ctx = createContext(tmpDir);
 
-  // Wait for scan — poll until we get results or timeout at 15s
-  // NOTE: We do NOT call grepExecute here because finder.grep can panic in
-  // fff-core on the first call when the content index is still building.
-  // Individual tests rely on grepExecute's built-in waitForScan() to handle this.
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 200));
@@ -133,13 +48,20 @@ after(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests
+// Import internal functions for tests that need tmpDir
 // ---------------------------------------------------------------------------
+import { __test } from "../index.js";
+const {
+  fsGrep,
+  loadGitignoreFilter,
+  globWalk,
+  detectGrepMode,
+  filterByPath,
+  resolvePath,
+  directFileGrep,
+} = await __test();
 
 describe("FffPlugin", () => {
-  // -----------------------------------------------------------------------
-  // Plugin initialization
-  // -----------------------------------------------------------------------
   describe("initialization", () => {
     it("should export an async function", () => {
       assert.equal(typeof FffPlugin, "function");
@@ -171,12 +93,6 @@ describe("FffPlugin", () => {
     });
 
     it("should cache finder instance per directory (no double scan)", async () => {
-      // createTempProject() calls cleanupTempProject(tmpDir) internally
-      // which deletes the shared test directory.  That breaks the Rust
-      // overlay index state and can trigger a segmentation fault
-      // (grep.rs:2110 slice panic) when the next suite runs
-      // finder.grep() with a stale overflow_start > files.len().
-      // Use a fresh unique directory instead.
       const freshDir = join(
         __dirname,
         ".tmp-fresh-" + process.pid + "-" + Date.now(),
@@ -219,9 +135,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Tool definition shape — OpenCode SDK contract
-  // -----------------------------------------------------------------------
   describe("tool definition shape (OpenCode SDK contract)", () => {
     it("grep tool must have description, args, and execute function", async () => {
       const { client } = createMockClient();
@@ -292,9 +205,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — basic functionality
-  // -----------------------------------------------------------------------
   describe("grep basic", () => {
     it("should find a simple text pattern", async () => {
       const result = await grepExecute({ pattern: "console.log" }, ctx);
@@ -356,17 +266,12 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — case sensitivity / smart case
-  // -----------------------------------------------------------------------
   describe("grep case sensitivity", () => {
     it("smart case (default): lowercase 'abc' matches both 'abc' and 'ABC'", async () => {
       const result = await grepExecute({ pattern: "abc" }, ctx);
       const caseJsLines = out(result)
         .split("\n")
         .filter((l) => l.includes("case.js"));
-      // case.js has: const lower = "abc";  const UPPER = "ABC";  const Mixed = "AbC";
-      // With smartCase (default), lowercase 'abc' should match both lines
       assert.ok(
         caseJsLines.length >= 2,
         `Smart case 'abc' should match both 'abc' and 'ABC', got ${caseJsLines.length} lines in case.js`,
@@ -378,7 +283,6 @@ describe("FffPlugin", () => {
       const caseJsLines = out(result)
         .split("\n")
         .filter((l) => l.includes("case.js"));
-      // Smart case: uppercase pattern → case-sensitive, so 'ABC' only matches "ABC" not "abc"
       for (const line of caseJsLines) {
         const content = line.split(":").slice(2).join(":");
         assert.ok(
@@ -386,7 +290,6 @@ describe("FffPlugin", () => {
           `Smart case 'ABC' should match 'ABC': ${content}`,
         );
       }
-      // Should NOT match the line with only lowercase "abc"
       const lowerLines = caseJsLines.filter((l) => {
         const content = l.split(":").slice(2).join(":");
         return content.includes('"abc"');
@@ -421,7 +324,6 @@ describe("FffPlugin", () => {
         { pattern: "abc", caseSensitive: false },
         ctx,
       );
-      // Both should return the same results
       assert.equal(
         resultDefault.metadata.matches,
         resultExplicit.metadata.matches,
@@ -442,9 +344,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — path filtering
-  // -----------------------------------------------------------------------
   describe("grep path filtering", () => {
     it("should scope results to a subdirectory", async () => {
       const result = await grepExecute({ pattern: "export", path: "src" }, ctx);
@@ -506,13 +405,10 @@ describe("FffPlugin", () => {
     });
 
     it("should not crash when search path is deleted (existsSync guard)", async () => {
-      // Create a subdirectory, index it, then delete it before searching.
-      // The existsSync guard in fsGrep should prevent a crash.
       const volatileDir = join(tmpDir, "volatile-search-dir");
       mkdirSync(volatileDir, { recursive: true });
       writeFileSync(join(volatileDir, "file.txt"), "searchable content here\n");
       try {
-        // First grep to ensure fff indexes the dir
         const result1 = await grepExecute(
           { pattern: "searchable", path: "volatile-search-dir" },
           ctx,
@@ -521,13 +417,11 @@ describe("FffPlugin", () => {
           out(result1).includes("volatile-search-dir"),
           "First search should find the file",
         );
-        // Now delete the directory and search again — should not crash
         rmSync(volatileDir, { recursive: true, force: true });
         const result2 = await grepExecute(
           { pattern: "searchable", path: "volatile-search-dir" },
           ctx,
         );
-        // reaching here proves no SIGBUS / segfault
         assert.equal(
           typeof result2,
           "object",
@@ -540,9 +434,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — exclude patterns
-  // -----------------------------------------------------------------------
   describe("grep exclude patterns", () => {
     it("should exclude files matching a single glob", async () => {
       const all = await grepExecute({ pattern: "export" }, ctx);
@@ -605,9 +496,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — include parameter
-  // -----------------------------------------------------------------------
   describe("grep include patterns", () => {
     it("should only include files matching a single glob pattern", async () => {
       const all = await grepExecute({ pattern: "export" }, ctx);
@@ -645,12 +533,8 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — Turkish / Unicode (fsGrep path)
-  // -----------------------------------------------------------------------
   describe("grep Turkish / Unicode", () => {
     it("should find Turkish characters via fsGrep (non-ASCII routing)", async () => {
-      // Write a file with Turkish content and search for it
       const trFile = join(tmpDir, "turkish.txt");
       writeFileSync(trFile, "İstanbul Ankara İzmir\nşeker çay kahve\n");
       try {
@@ -669,18 +553,10 @@ describe("FffPlugin", () => {
     });
 
     it("Turkish uppercase İ does NOT match case-insensitively via ASCII smart case (known fff limitation)", async () => {
-      // fff's smart case uses ASCII-only case folding: I (U+0049) ≠ İ (U+0130).
-      // Pattern 'istanbul' (ASCII) will NOT match 'İstanbul' case-insensitively.
-      // This documents the known limitation described in AGENTS.md:
-      // "Use lowercase patterns for Turkish case-insensitive search... İ ≠ I in ASCII."
       const trFile = join(tmpDir, "turkish-ci.txt");
       writeFileSync(trFile, "İstanbul güzel bir şehir\n");
       try {
         const result = await grepExecute({ pattern: "istanbul" }, ctx);
-        // With caseSensitive=false, the ASCII-only smart case won't match İ
-        // because fff folds I→i but İ (U+0130) is outside the ASCII range.
-        // The workaround: use the exact Unicode char with caseSensitive:true,
-        // or use case-insensitive Unicode pattern that routes via fsGrep.
         const found = out(result).includes("turkish-ci.txt");
         assert.ok(
           !found,
@@ -710,9 +586,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — context lines
-  // -----------------------------------------------------------------------
   describe("grep context lines", () => {
     it("context > 0 should return more lines than context=0", async () => {
       const noCtx = await grepExecute(
@@ -737,7 +610,6 @@ describe("FffPlugin", () => {
     });
 
     it("contextBefore line numbers are strictly less than the match line number", async () => {
-      // Write a known file so we know exactly which line the match is on
       const ctxFile = join(tmpDir, "ctx-test.txt");
       const lines = [
         "line-A\n",
@@ -757,11 +629,9 @@ describe("FffPlugin", () => {
           outLines.length >= 3,
           `Expected >=3 lines for context=2, got ${outLines.length}`,
         );
-        // Find the match line
         const matchLine = outLines.find((l) => l.includes("MATCH_LINE"));
         assert.ok(matchLine, "Should contain the match line");
         const matchLineNum = parseInt(matchLine.split(":")[1], 10);
-        // All contextBefore entries must have lineNumber < matchLineNum
         const contextBeforeLines = [];
         let collecting = true;
         for (const l of outLines) {
@@ -784,9 +654,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — limit
-  // -----------------------------------------------------------------------
   describe("grep limit", () => {
     it("should respect limit parameter", async () => {
       const result = await grepExecute({ pattern: ".", limit: 2 }, ctx);
@@ -828,9 +695,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — input validation
-  // -----------------------------------------------------------------------
   describe("grep input validation", () => {
     it("should throw on negative context", async () => {
       await assert.rejects(
@@ -854,9 +718,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — metadata contract
-  // -----------------------------------------------------------------------
   describe("grep metadata contract", () => {
     it("should return metadata.matches as a positive integer", async () => {
       const result = await grepExecute({ pattern: "foo" }, ctx);
@@ -875,7 +736,6 @@ describe("FffPlugin", () => {
         "boolean",
         "truncated must be boolean",
       );
-      // With limit=1 and many matches, truncated should be true (if there are >1 matches)
       const allResult = await grepExecute({ pattern: "." }, ctx);
       if (allResult.metadata.matches > 1) {
         assert.ok(
@@ -895,9 +755,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — abort handling
-  // -----------------------------------------------------------------------
   describe("grep abort", () => {
     it("should throw 'Aborted' when signal is already aborted", async () => {
       const abortCtx = createContext(tmpDir);
@@ -909,9 +766,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // grep — regex mode
-  // -----------------------------------------------------------------------
   describe("grep regex mode", () => {
     it("should support regex patterns", async () => {
       const result = await grepExecute({ pattern: "export\\s+const" }, ctx);
@@ -931,9 +785,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // glob — basic functionality
-  // -----------------------------------------------------------------------
   describe("glob basic", () => {
     it("should find files by fuzzy pattern", async () => {
       const result = await globExecute({ pattern: "foo" }, ctx);
@@ -946,7 +797,6 @@ describe("FffPlugin", () => {
       assert.ok(out(result).length > 0);
       const lines = out(result).split("\n").filter(Boolean);
       for (const line of lines) {
-        // Upstream returns absolute paths; verify they're absolute
         const isAbsolute = line.startsWith("/") || /^[a-zA-Z]:\\/.test(line);
         assert.ok(isAbsolute, `Glob path should be absolute: ${line}`);
       }
@@ -985,13 +835,9 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // glob — type filter
-  // -----------------------------------------------------------------------
   describe("glob type filter", () => {
     it("default (no type) should return files", async () => {
       const result = await globExecute({ pattern: "." }, ctx);
-      // fff fileSearch returns FileItems which have relativePath (typically no trailing /)
       assert.ok(out(result).length > 0, "Should find files");
     });
 
@@ -1003,7 +849,6 @@ describe("FffPlugin", () => {
       assert.ok(out(result).length > 0, "Should find directories");
       const lines = out(result).split("\n").filter(Boolean);
       for (const line of lines) {
-        // fff DirItem.relativePath typically ends with /
         const normalized = line.replace(/\\/g, "/");
         assert.ok(
           normalized.endsWith("/") || normalized.includes("/"),
@@ -1013,7 +858,6 @@ describe("FffPlugin", () => {
     });
 
     it("invalid type value is silently ignored (Zod optional enum coerces to undefined)", async () => {
-      // Zod enum with optional() means invalid values become undefined, falling to default file search
       const result = await globExecute(
         { pattern: "foo", type: "invalid" },
         ctx,
@@ -1022,16 +866,12 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // glob — path filtering
-  // -----------------------------------------------------------------------
   describe("glob path filtering", () => {
     it("should scope results to a subdirectory", async () => {
       const result = await globExecute({ pattern: ".", path: "src" }, ctx);
       const tmpDirNorm = tmpDir.replace(/\\/g, "/");
       for (const line of out(result).split("\n").filter(Boolean)) {
         const normalized = line.replace(/\\/g, "/");
-        // Absolute paths; verify they contain src/ path component
         assert.ok(
           normalized.startsWith(tmpDirNorm) &&
             (normalized.endsWith("/src") || normalized.includes("/src/")),
@@ -1047,9 +887,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // glob — limit
-  // -----------------------------------------------------------------------
   describe("glob limit", () => {
     it("should respect limit parameter", async () => {
       const result = await globExecute({ pattern: ".", limit: 2 }, ctx);
@@ -1079,9 +916,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // glob — abort handling
-  // -----------------------------------------------------------------------
   describe("glob abort", () => {
     it("should throw 'Aborted' when signal is already aborted", async () => {
       const abortCtx = createContext(tmpDir);
@@ -1093,9 +927,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // glob — metadata contract
-  // -----------------------------------------------------------------------
   describe("glob metadata contract", () => {
     it("should return metadata.count as a non-negative integer", async () => {
       const result = await globExecute({ pattern: "foo" }, ctx);
@@ -1128,9 +959,6 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Edge cases
-  // -----------------------------------------------------------------------
   describe("edge cases", () => {
     it("grep with special regex characters", async () => {
       const result = await grepExecute({ pattern: "(import|export)" }, ctx);
@@ -1148,16 +976,11 @@ describe("FffPlugin", () => {
     });
 
     it("grep literal text with regex metacharacters (parens)", async () => {
-      // fff always runs in regex mode, so literal parens need escaping to match literally.
-      // This test documents current behavior: foo(bar) is an invalid regex capture group
-      // and fff falls back to literal matching.
       const result = await grepExecute({ pattern: "foo(bar)" }, ctx);
       const lines = out(result).split("\n").filter(Boolean);
-      // fff's fallback for invalid regex may still match — verify it doesn't crash
       assert.equal(typeof result, "object");
       const metaLines = lines.filter((l) => l.includes("metachars.js"));
       if (metaLines.length > 0) {
-        // fff fell back to literal matching — the line exists
         for (const l of metaLines) {
           assert.ok(l.includes("foo(bar)"), `Expected literal foo(bar): ${l}`);
         }
@@ -1165,20 +988,14 @@ describe("FffPlugin", () => {
     });
 
     it("grep literal text with regex metacharacters (brackets)", async () => {
-      // file[1].txt is a valid regex: 'file' followed by character class [1]
-      // In regex mode, this matches 'file1.txt' (no dot needed). This documents
-      // that always-regex-mode can produce unexpected literal matches.
       const result = await grepExecute({ pattern: "file[1].txt" }, ctx);
       assert.equal(typeof result, "object");
     });
 
     it("grep literal text with regex metacharacters (dot)", async () => {
-      // In regex mode, 'example.com' matches 'example<any_char>com'
-      // This is the expected regex behavior for unescaped dots.
       const result = await grepExecute({ pattern: "example.com" }, ctx);
       assert.equal(typeof result, "object");
       if (out(result).length > 0) {
-        // The dot matched literally because the content is exactly "example.com"
         const metaLines = out(result)
           .split("\n")
           .filter(Boolean)
@@ -1195,9 +1012,6 @@ describe("FffPlugin", () => {
       assert.equal(typeof result, "object");
     });
 
-    // -----------------------------------------------------------------------
-    // Single-file 100% recall — directFileGrep path
-    // -----------------------------------------------------------------------
     it("single-file path uses directFileGrep with 100% recall (bypasses fff)", async () => {
       const singleFile = join(tmpDir, "src", "foo.js");
       const result = await grepExecute(
@@ -1210,7 +1024,6 @@ describe("FffPlugin", () => {
         "Should find the single file",
       );
       assert.ok(normalized.includes("bar"), "Should match the content");
-      // In single-file mode, the match count should be 1 (only one file searched)
       assert.equal(
         result.metadata.matches,
         1,
@@ -1278,7 +1091,6 @@ describe("FffPlugin", () => {
     });
 
     it("plugin handles undefined args gracefully", async () => {
-      // OpenCode might pass extra/undefined fields
       const result = await grepExecute(
         { pattern: "foo", extraField: "ignored" },
         ctx,
@@ -1298,14 +1110,8 @@ describe("FffPlugin", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Grep pagination — verifies cursor-based multi-page fetch
-  // -----------------------------------------------------------------------
   describe("grep pagination", () => {
     it("should return many results when a file has many matches", async () => {
-      // The test project has small files. Pagination matters when a single
-      // file has more matches than one page's worth of files can cover.
-      // Use pattern "." to match every line in every file.
       const result = await grepExecute({ pattern: ".", limit: 50 }, ctx);
       const lines = out(result).split("\n").filter(Boolean);
       assert.ok(lines.length > 0, "Should find at least some matches");
@@ -1316,8 +1122,6 @@ describe("FffPlugin", () => {
     });
 
     it("should not crash or throw when results are paginated", async () => {
-      // Pattern that matches many lines across many files — exercises
-      // the pagination loop path. Should not throw.
       const result = await grepExecute({ pattern: ".", limit: 500 }, ctx);
       assert.equal(typeof result, "object");
       const lines = out(result).split("\n").filter(Boolean);
@@ -1352,12 +1156,15 @@ describe("FffPlugin", () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // Internal function tests that need tmpDir
+  // -------------------------------------------------------------------------
   describe("fsGrep internals", () => {
     it("should handle unreadable directories gracefully in readdirSync catch block", async () => {
-      if (process.platform === "win32") return; // Skip chmod permission checks on Windows
+      if (process.platform === "win32") return;
       const unreadableDir = join(tmpDir, "unreadable");
       mkdirSync(unreadableDir);
-      chmodSync(unreadableDir, 0o000); // Remove all permissions
+      chmodSync(unreadableDir, 0o000);
 
       try {
         const results = await fsGrep(
@@ -1376,7 +1183,7 @@ describe("FffPlugin", () => {
           "Should return empty array when directory is unreadable",
         );
       } finally {
-        chmodSync(unreadableDir, 0o755); // Restore permissions for cleanup
+        chmodSync(unreadableDir, 0o755);
       }
     });
   });
@@ -1422,10 +1229,10 @@ describe("FffPlugin", () => {
 
   describe("globWalk internals", () => {
     it("should handle unreadable directories gracefully in readdir catch block", async () => {
-      if (process.platform === "win32") return; // Skip chmod permission checks on Windows
+      if (process.platform === "win32") return;
       const unreadableDir = join(tmpDir, "unreadable_glob");
       mkdirSync(unreadableDir);
-      chmodSync(unreadableDir, 0o000); // Remove all permissions
+      chmodSync(unreadableDir, 0o000);
 
       try {
         const results = await globWalk(unreadableDir, "*", tmpDir, 10, "file");
@@ -1435,113 +1242,17 @@ describe("FffPlugin", () => {
           "Should return empty array when directory is unreadable",
         );
       } finally {
-        chmodSync(unreadableDir, 0o755); // Restore permissions for cleanup
+        chmodSync(unreadableDir, 0o755);
       }
-    });
-  });
-
-  describe("detectGrepMode", () => {
-    it("should correctly identify plain text and regex patterns", () => {
-      // Plain text patterns (even with symbols like dots, parens, commas)
-      assert.strictEqual(detectGrepMode("hello world"), "plain");
-      assert.strictEqual(detectGrepMode("example.com"), "plain");
-      assert.strictEqual(detectGrepMode("foo(bar)"), "plain");
-      assert.strictEqual(detectGrepMode("a,b,c"), "plain");
-
-      // Regex patterns
-      assert.strictEqual(detectGrepMode("\\s+"), "regex");
-      assert.strictEqual(detectGrepMode("import|export"), "regex");
-      assert.strictEqual(detectGrepMode("foo[0-9]"), "regex");
-      assert.strictEqual(detectGrepMode("^start"), "regex");
-      assert.strictEqual(detectGrepMode("end$"), "regex");
-      assert.strictEqual(detectGrepMode("a\\+"), "regex");
-      assert.strictEqual(detectGrepMode("a\\*"), "regex");
-      assert.strictEqual(detectGrepMode("a\\?"), "regex");
-    });
-
-    it("should handle null or undefined gracefully", () => {
-      // should return "plain" or throw, typically "plain" if pattern is falsey
-      assert.strictEqual(detectGrepMode(null), "plain");
-      assert.strictEqual(detectGrepMode(undefined), "plain");
-      assert.strictEqual(detectGrepMode(""), "plain");
-    });
-  });
-
-  describe("filterByPath", () => {
-    it("should correctly include/exclude items based on target path", () => {
-      const items = [
-        { path: "src/index.js" },
-        { path: "src/utils/helper.js" },
-        { path: "docs/readme.md" },
-        { path: "package.json" },
-      ];
-
-      // Root paths should return all items
-      assert.deepEqual(filterByPath(items, "path", "."), items);
-      assert.deepEqual(filterByPath(items, "path", "./"), items);
-      assert.deepEqual(filterByPath(items, "path", "/"), items);
-
-      // Specific path should filter
-      const srcItems = filterByPath(items, "path", "src");
-      assert.strictEqual(srcItems.length, 2);
-      assert.strictEqual(srcItems[0].path, "src/index.js");
-      assert.strictEqual(srcItems[1].path, "src/utils/helper.js");
-
-      // Subdirectory exact match
-      const utilsItems = filterByPath(items, "path", "src/utils/helper.js");
-      assert.strictEqual(utilsItems.length, 1);
-      assert.strictEqual(utilsItems[0].path, "src/utils/helper.js");
-    });
-  });
-
-  describe("resolvePath", () => {
-    it("should correctly resolve relative paths and prevent traversal", () => {
-      const workspace =
-        process.platform === "win32" ? "C:\\var\\workspace" : "/var/workspace";
-      const outsidePath =
-        process.platform === "win32" ? "C:\\etc\\passwd" : "/etc/passwd";
-      const insidePath =
-        process.platform === "win32"
-          ? "C:\\var\\workspace\\src"
-          : "/var/workspace/src";
-
-      // Absolute path outside workspace now throws
-      assert.throws(
-        () => resolvePath(workspace, outsidePath),
-        /Path is outside the workspace directory/,
-      );
-
-      // Absolute path inside workspace resolves
-      assert.strictEqual(resolvePath(workspace, insidePath), insidePath);
-
-      // Path traversal attempts throw
-      assert.throws(
-        () => resolvePath(workspace, "../etc/passwd"),
-        /Path is outside the workspace directory/,
-      );
-
-      // Relative path
-      assert.strictEqual(
-        resolvePath(workspace, "src/index.js"),
-        path.resolve(workspace, "src/index.js"),
-      );
-      assert.strictEqual(
-        resolvePath(workspace, "./src"),
-        path.resolve(workspace, "src"),
-      );
-
-      // Falsy input
-      assert.strictEqual(resolvePath(workspace, ""), path.resolve(workspace));
-      assert.strictEqual(resolvePath(workspace, null), path.resolve(workspace));
     });
   });
 
   describe("directFileGrep", () => {
     it("should handle unreadable files gracefully in readFile catch block", async () => {
-      if (process.platform === "win32") return; // Skip chmod permission checks on Windows
+      if (process.platform === "win32") return;
       const unreadableFile = join(tmpDir, "unreadable.txt");
       writeFileSync(unreadableFile, "secret content");
-      chmodSync(unreadableFile, 0o000); // Remove all permissions
+      chmodSync(unreadableFile, 0o000);
 
       try {
         const results = await directFileGrep(
@@ -1556,7 +1267,7 @@ describe("FffPlugin", () => {
           "Should return empty array when file is unreadable",
         );
       } finally {
-        chmodSync(unreadableFile, 0o644); // Restore permissions for cleanup
+        chmodSync(unreadableFile, 0o644);
       }
     });
 
@@ -1567,314 +1278,6 @@ describe("FffPlugin", () => {
       const results = await directFileGrep(file, tmpDir, "[", 0);
       assert.strictEqual(results.length, 1);
       assert.strictEqual(results[0].lineContent, "content with [ symbol");
-    });
-  });
-});
-
-// =========================================================================
-// SIGBUS / stability stress tests
-// =========================================================================
-//
-// SIGBUS cannot be caught in JavaScript — it kills the process outright.
-// These tests exercise the conditions that historically trigger SIGBUS in fff's
-// native layer (mmap'd files truncated during I/O, multiple native instances,
-// frecency DB corruption). If any test causes a SIGBUS, the entire test
-// process exits with signal 7 and the remaining tests won't run.
-// =========================================================================
-
-import { __test } from "../index.js";
-const {
-  fsGrep,
-  loadGitignoreFilter,
-  globWalk,
-  detectGrepMode,
-  filterByPath,
-  resolvePath,
-  directFileGrep,
-} = await __test();
-const { FileFinder } = await import("@ff-labs/fff-node");
-const {
-  appendFileSync,
-  unlinkSync,
-  openSync,
-  closeSync,
-  ftruncateSync,
-  renameSync,
-  cpSync,
-  rmdirSync,
-  chmodSync,
-} = await import("node:fs");
-
-describe("SIGBUS / stability stress tests", () => {
-  let stressDir;
-  let stressFinder;
-
-  // Each test gets its own temp dir and finder to avoid cross-contamination
-  async function setupStressDir() {
-    stressDir = join(
-      __dirname,
-      `.tmp-stress-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-    mkdirSync(stressDir, { recursive: true });
-    // Create a decent number of files to make the index non-trivial
-    for (let i = 0; i < 50; i++) {
-      writeFileSync(
-        join(stressDir, `file-${i}.txt`),
-        `line1 of file ${i}\n${"x".repeat(200)}\nline3 of file ${i}\n`,
-      );
-    }
-  }
-
-  async function initFinder() {
-    const result = FileFinder.create({
-      basePath: stressDir,
-      aiMode: false, // Match production
-      disableMmapCache: true, // Match production
-      disableContentIndexing: true, // Match production
-      disableWatch: true, // Disable watcher so destroy() doesn't hang
-    });
-    if (!result.ok)
-      throw new Error(`stress finder init failed: ${result.error}`);
-    stressFinder = result.value;
-    await stressFinder.waitForScan(10000);
-  }
-
-  function cleanup() {
-    // destroy() is safe here because disableWatch: true prevents the native
-    // watcher thread from blocking on join.
-    if (stressFinder && !stressFinder.isDestroyed) {
-      try {
-        stressFinder.destroy();
-      } catch {
-        /* fff-node may throw on stale handles */
-      }
-    }
-    cleanupTempProject(stressDir);
-  }
-
-  // ----------------------------------------------------------------------
-  // File mutation during active search
-  // ----------------------------------------------------------------------
-  describe("file mutation during search", () => {
-    it("should not crash when a file is deleted between scan and grep", async () => {
-      await setupStressDir();
-      try {
-        await initFinder();
-        // Delete a file that was indexed
-        unlinkSync(join(stressDir, "file-25.txt"));
-        // Grep should handle missing file gracefully
-        const result = stressFinder.grep("line1");
-        // Reachability check — SIGBUS would kill the process before getting here
-        assert.equal(
-          typeof result,
-          "object",
-          "grep should return a result after file deletion",
-        );
-        if (result.ok) {
-          assert.equal(typeof result.value.items, "object");
-        }
-      } finally {
-        cleanup();
-      }
-    });
-
-    it("should not crash when a file is truncated between scan and grep", async () => {
-      await setupStressDir();
-      try {
-        await initFinder();
-        // Truncate a file to 0 bytes (classic SIGBUS trigger for mmap'd files)
-        const fd = openSync(join(stressDir, "file-10.txt"), "w");
-        ftruncateSync(fd, 0);
-        closeSync(fd);
-        const result = stressFinder.grep("file-10");
-        // Reachability check — SIGBUS would kill the process before getting here
-        assert.equal(
-          typeof result,
-          "object",
-          "grep should return a result after file truncation",
-        );
-      } finally {
-        cleanup();
-      }
-    });
-
-    it("should not crash when a file is overwritten during grep", async () => {
-      await setupStressDir();
-      try {
-        await initFinder();
-        // Rapidly overwrite files while searching
-        const searchPromise = stressFinder.grep("x{200}");
-        for (let i = 0; i < 10; i++) {
-          writeFileSync(
-            join(stressDir, `file-${i}.txt`),
-            `overwritten ${Date.now()}\n`,
-          );
-        }
-        const result = await searchPromise;
-        // Reachability check — SIGBUS would kill the process before getting here
-        assert.equal(
-          typeof result,
-          "object",
-          "grep should return a result during file mutation",
-        );
-      } finally {
-        cleanup();
-      }
-    });
-
-    it("should not crash when files are created and deleted rapidly", async () => {
-      await setupStressDir();
-      try {
-        await initFinder();
-        // Rapid create/delete cycle
-        for (let i = 0; i < 100; i++) {
-          const path = join(stressDir, `volatile-${i}.txt`);
-          writeFileSync(path, `volatile content ${i}` + "\n");
-          if (i % 2 === 0) {
-            unlinkSync(path);
-          }
-        }
-        // Now search — should not crash on stale directory entries
-        const result = stressFinder.grep("volatile");
-        // Reachability check — SIGBUS would kill the process before getting here
-        assert.equal(
-          typeof result,
-          "object",
-          "grep should handle volatile files",
-        );
-      } finally {
-        cleanup();
-      }
-    });
-  });
-
-  // ----------------------------------------------------------------------
-  // Multiple finder instances (potential SIGBUS from leaked native handles)
-  // ----------------------------------------------------------------------
-  describe("multiple native instances", () => {
-    it("should not crash when creating multiple FileFinder instances for same dir", async () => {
-      await setupStressDir();
-      const finders = [];
-      try {
-        // Create 5 separate finders for the same directory
-        for (let i = 0; i < 5; i++) {
-          const result = FileFinder.create({
-            basePath: stressDir,
-            aiMode: false,
-            disableMmapCache: true,
-            disableWatch: true, // Prevent destroy() hang
-          });
-          if (result.ok) finders.push(result.value);
-        }
-        // Run searches on all of them concurrently
-        const results = await Promise.all(finders.map((f) => f.grep("line1")));
-        // Reaching this point proves no SIGBUS — the assertion is a reachability check
-        for (const r of results) {
-          assert.equal(
-            typeof r,
-            "object",
-            "finder.grep should return a result object",
-          );
-        }
-      } finally {
-        // Safe to destroy: disableWatch:true prevents native thread join blocking
-        for (const f of finders) {
-          try {
-            if (!f.isDestroyed) f.destroy();
-          } catch {
-            /* stale handle */
-          }
-        }
-        cleanup();
-      }
-    });
-
-    it("should not crash when destroy() is called while searches are pending", async () => {
-      await setupStressDir();
-      try {
-        const result = FileFinder.create({
-          basePath: stressDir,
-          aiMode: false,
-          disableMmapCache: true,
-          disableWatch: true, // Prevent destroy() hang
-        });
-        if (!result.ok) throw new Error(`init failed: ${result.error}`);
-        const finder = result.value;
-        await finder.waitForScan(5000);
-        // Start a search, then immediately destroy
-        const searchPromise = finder.grep(".");
-        finder.destroy();
-        // The search should return an error, not SIGBUS
-        const searchResult = await searchPromise;
-        // Reaching this assertion proves no SIGBUS — destroy() mid-search is the actual test
-        assert.equal(
-          typeof searchResult,
-          "object",
-          "destroy during search should return a result, not SIGBUS",
-        );
-      } finally {
-        cleanup();
-      }
-    });
-  });
-
-  // ----------------------------------------------------------------------
-  // Large files (potential mmap pressure)
-  // ----------------------------------------------------------------------
-  describe("large file handling", () => {
-    it("should not crash when grepping a large file that gets truncated", async () => {
-      await setupStressDir();
-      try {
-        // Create a 1MB file
-        const bigFile = join(stressDir, "bigfile.txt");
-        writeFileSync(bigFile, "A".repeat(1024 * 1024));
-
-        await initFinder();
-
-        // Truncate the large file (classic SIGBUS for mmap'd regions)
-        const fd = openSync(bigFile, "w");
-        ftruncateSync(fd, 0);
-        closeSync(fd);
-
-        const result = stressFinder.grep("AAAA");
-        // Reachability check — SIGBUS would kill the process before getting here
-        assert.equal(
-          typeof result,
-          "object",
-          "grep should return a result after large file truncation",
-        );
-      } finally {
-        cleanup();
-      }
-    });
-  });
-
-  // ----------------------------------------------------------------------
-  // Plugin-level stress: multiple FffPlugin() calls
-  // ----------------------------------------------------------------------
-  describe("plugin-level stress", () => {
-    it("should not crash when FffPlugin is called many times for the same directory", async () => {
-      // This tests the instance cache — repeated calls should reuse the same finder
-      const { client } = createMockClient();
-      for (let i = 0; i < 10; i++) {
-        const result = await FffPlugin({ directory: tmpDir, client });
-        assert.ok(result.tool.grep);
-        assert.ok(result.tool.glob);
-      }
-    });
-
-    it("should not crash when FffPlugin is called for many different directories", async () => {
-      const { client } = createMockClient();
-      const dirs = [];
-      for (let i = 0; i < 5; i++) {
-        const d = createTempProject();
-        dirs.push(d);
-        const result = await FffPlugin({ directory: d, client });
-        assert.ok(result.tool.grep);
-        assert.ok(result.tool.glob);
-      }
-      // Clean up temp dirs
-      for (const d of dirs) cleanupTempProject(d);
     });
   });
 });

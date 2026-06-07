@@ -62,8 +62,8 @@ cd ~/.config/opencode && npm install
 git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search && npm install
 
-# Run the test suite (112 tests)
-node --test test/index.test.js
+# Run the test suite (172 tests)
+node --test 'test/*.test.js'
 
 # Run session simulation tests
 node --test test/session-*.js
@@ -79,8 +79,11 @@ opencode-fff-search/
 ├── index.js          # Single plugin file (ES module)
 ├── package.json      # NPM package configuration
 ├── test/
-│   ├── index.test.js                  # 112 unit tests
-│   └── ...                            # Stress, session, integration tests
+│   ├── helpers.mjs                     # Shared test utilities
+│   ├── plugin.test.js                  # Plugin integration tests
+│   ├── internals.test.js               # Internal function unit tests
+│   ├── stress.test.js                  # SIGBUS stability stress tests
+│   └── ...                             # Session, integration tests
 ├── AGENTS.md         # Agent context documentation
 ├── README.md         # This file
 └── LICENSE           # MIT License
@@ -298,8 +301,8 @@ fff's grep may not find matches in all files when searching directories. For 100
 git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search && npm install
 
-# Run the test suite (112 tests)
-node --test test/index.test.js
+# Run the test suite (172 tests)
+node --test 'test/*.test.js'
 
 # Run session simulation tests
 node --test test/session-*.js
@@ -317,7 +320,7 @@ node -e "import('./index.js').then(m => console.log('OK'))"
 
 PRs welcome! Please:
 
-1. Run the test suite: `node --test test/index.test.js`
+1. Run the test suite: `node --test 'test/*.test.js'`
 2. Follow existing code style (no semicolons, 2-space indent)
 3. Update README if changing behavior
 

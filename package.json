@@ -1,55 +1,55 @@
 {
-	"name": "opencode-fff-search",
-	"version": "0.6.0",
-	"description": "OpenCode plugin that replaces default grep/glob with fff.nvim's ultra-fast search",
-	"type": "module",
-	"main": "index.js",
-	"exports": {
-		".": "./index.js"
-	},
-	"files": [
-		"index.js"
-	],
-	"keywords": [
-		"opencode",
-		"plugin",
-		"fff",
-		"search",
-		"file-search",
-		"grep",
-		"glob",
-		"fast",
-		"fuzzy",
-		"frecency"
-	],
-	"author": "ozgurulukir",
-	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/ozgurulukir/opencode-fff-search.git"
-	},
-	"bugs": {
-		"url": "https://github.com/ozgurulukir/opencode-fff-search/issues"
-	},
-	"homepage": "https://github.com/ozgurulukir/opencode-fff-search#readme",
-	"peerDependencies": {
-		"@opencode-ai/plugin": "^1.14.28"
-	},
-	"dependencies": {
-		"@ff-labs/fff-bun": "^0.8.4",
-		"@ff-labs/fff-node": "^0.8.1",
-		"minimatch": "^10.2.5"
-	},
-	"engines": {
-		"node": ">=18.0.0"
-	},
-	"os": [
-		"darwin",
-		"linux",
-		"win32"
-	],
-	"cpu": [
-		"x64",
-		"arm64"
-	]
+  "name": "opencode-fff-search",
+  "version": "0.7.0",
+  "description": "OpenCode plugin that replaces default grep/glob with fff.nvim's ultra-fast search",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js"
+  ],
+  "keywords": [
+    "opencode",
+    "plugin",
+    "fff",
+    "search",
+    "file-search",
+    "grep",
+    "glob",
+    "fast",
+    "fuzzy",
+    "frecency"
+  ],
+  "author": "ozgurulukir",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ozgurulukir/opencode-fff-search.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ozgurulukir/opencode-fff-search/issues"
+  },
+  "homepage": "https://github.com/ozgurulukir/opencode-fff-search#readme",
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.14.28"
+  },
+  "dependencies": {
+    "@ff-labs/fff-bun": "^0.8.4",
+    "@ff-labs/fff-node": "^0.8.1",
+    "minimatch": "^10.2.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
 }

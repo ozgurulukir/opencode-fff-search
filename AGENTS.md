@@ -133,8 +133,17 @@ This means `SKIP_DIRS` is only needed for the filesystem fallback functions.
 ### Testing
 
 ```bash
-# Run the automated test suite (node:test, zero dependencies)
-node --test test/index.test.js
+# Run all tests (node:test, zero dependencies)
+node --test 'test/*.test.js'
+
+# Run only plugin integration tests
+node --test test/plugin.test.js
+
+# Run only internal function unit tests
+node --test test/internals.test.js
+
+# Run only SIGBUS stress tests
+node --test test/stress.test.js
 
 # Test plugin loads correctly
 node -e "import('./index.js').then(m => console.log('Plugin loads OK'))"
@@ -515,13 +524,21 @@ Automated test suite using `node:test` (zero external dependencies, Node.js 18+)
 ### Core tests
 
 ```bash
-node --test test/index.test.js
+node --test 'test/*.test.js'
 ```
 
-112 unit tests across 24 suites covering initialization, tool shape, grep/glob behavior,
-path filtering, exclude filtering, context lines, limit, file-specific search,
-case sensitivity (smart case + explicit), regex mode, abort handling, pagination,
-stress tests, and edge cases.
+172 tests across 44 suites split across three files:
+
+- **`test/plugin.test.js`** — Plugin integration tests (initialization, tool shape, grep/glob
+  execute, case sensitivity, path filtering, exclude/include, Turkish/Unicode, context lines,
+  limit, abort, regex mode, pagination, edge cases, fsGrep/globWalk/directFileGrep internals)
+- **`test/internals.test.js`** — Pure unit tests for internal functions (detectGrepMode,
+  filterByPath, resolvePath, parsePatterns, shouldIncludeFile, applyMinimatchFilter, safeLog,
+  waitForScan, searchInFile, fetchGrepPages, lazyFff, performGrepRouting)
+- **`test/stress.test.js`** — SIGBUS stability stress tests (file mutation, multiple native
+  instances, large files, plugin-level stress)
+
+Shared helpers live in `test/helpers.mjs`.
 
 ### Session simulation tests (synthetic 270-file project)
 
@@ -692,9 +709,10 @@ opencode-fff-search/
 ├── index.js          # Single plugin file (ES module)
 ├── package.json      # NPM package configuration
 ├── test/
-│   ├── helpers/
-│   │   └── stress.js                  # Shared helpers: project structure, finder init
-│   ├── index.test.js                  # 85 core unit tests
+│   ├── helpers.mjs                     # Shared test utilities (createTempProject, createMockClient, etc.)
+│   ├── plugin.test.js                  # Plugin integration tests (initialization, grep/glob execute)
+│   ├── internals.test.js               # Pure unit tests for internal functions
+│   ├── stress.test.js                  # SIGBUS stability stress tests
 │   ├── session-edit.js                # Edit+search stress test
 │   ├── session-refactor.js            # Rename during search stress test
 │   ├── session-db.js                  # Session DB stress test
@@ -729,7 +747,7 @@ Only `index.js` is included in the published npm package (see `package.json` `fi
 
 When modifying the plugin:
 
-1. **Run core tests**: `node --test test/index.test.js`
+1. **Run core tests**: `node --test 'test/*.test.js'`
 2. **Run session tests**: `node --test test/session-*.js`
 3. **Test locally**: Link the plugin to your OpenCode config and test with real searches
 4. **Check logs**: `opencode debug config --print-logs 2>&1 | grep fff`

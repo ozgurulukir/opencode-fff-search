@@ -1344,5 +1344,14 @@ export async function __test() {
     directFileGrep,
     fsGrep,
     globWalk,
+    safeLog,
+    waitForScan,
+    parsePatterns,
+    shouldIncludeFile,
+    applyMinimatchFilter,
+    searchInFile,
+    fetchGrepPages,
+    lazyFff,
+    performGrepRouting,
   };
 }
