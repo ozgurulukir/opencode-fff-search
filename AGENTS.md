@@ -7,6 +7,7 @@ This document provides essential context for AI agents working on the opencode-f
 OpenCode plugin that replaces OpenCode's built-in `grep` and `glob` file search tools with [fff](https://github.com/dmtrKovalenko/fff)'s ultra-fast, typo-resistant search engine.
 
 **Key characteristics:**
+
 - Single-file ES module plugin (`index.js`)
 - No build step required
 - Node.js 18+ required (ES modules)
@@ -33,8 +34,8 @@ The plugin exports an async default function `(input)` that:
 
 ```
 grep:
-  File path      → directFileGrep (Node.js readFileSync) → format
-  Unicode pattern → fsGrep (readdirSync + readFileSync + Unicode regex) → post-filter → format
+  File path      → directFileGrep (Node.js fsPromises.readFile) → format
+  Unicode pattern → fsGrep (fsPromises.readdir + fsPromises.readFile + Unicode regex) → post-filter → format
   Outside index  → fsGrep (path outside basePath) → format
   ASCII pattern  → fff grep (plain or regex mode) → if zero → plain→regex retry → fsGrep fallback → post-filter → format
 
@@ -64,13 +65,14 @@ glob:
 - `detectGrepMode(pattern)` — Returns `"regex"` or `"plain"` based on regex metachar detection
 - `finder.grep(pattern, opts)` — Content search with regex/plain mode + smart case + cursor pagination
 - `directFileGrep(filePath, basePath, pattern, ctxLines)` — Direct file read for 100% recall on single-file searches
-- `fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude)` — Directory-level grep for non-ASCII (Unicode/Turkish) patterns; walks dirs with readdirSync and reads files with readFileSync using exact Unicode regex (`u` flag). Bypasses fff's Unicode normalization to avoid `ş↔s` overcount. Applies include/exclude during traversal.
-- `globWalk(dir, pattern, basePath, limit, type)` — Real glob matching via recursive readdir + minimatch (supports file/directory type)
-- `loadGitignoreFilter(basePath)` — Reads `.gitignore` and augments `SKIP_DIRS` with directory-name entries; cached per basePath. Used by `fsGrep` and `globWalk`.
+- `fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude)` — Directory-level grep for non-ASCII (Unicode/Turkish) patterns; walks dirs with `fsPromises.readdir` and reads files with `fsPromises.readFile` using exact Unicode regex (`u` flag). Bypasses fff's Unicode normalization to avoid `ş↔s` overcount. Applies include/exclude during traversal. Include/exclude patterns are pre-parsed once via `parsePatterns()` before the loop.
+- `globWalk(dir, pattern, basePath, limit, type)` — Real glob matching via recursive `fsPromises.readdir` + minimatch (supports file/directory type)
+- `loadGitignoreFilter(basePath)` — Async function that reads `.gitignore` via `fsPromises.readFile` and augments `SKIP_DIRS` with directory-name entries; cached per basePath. Used by `fsGrep` and `globWalk` (both `await` it).
 - `fetchGrepPages(finder, pattern, opts, limit, abort, client)` — Cursor-based pagination across fff's 50-item pages; page ceiling = `ceil(limit/50) + 2`
 - `filterByPath(items, pathKey, targetPath)` — Post-filter results to a subdirectory or file
 - `filterByGlob(items, pattern)` — Post-filter results by include glob pattern
 - `filterByExclude(items, exclude)` — Post-filter results by exclude glob pattern
+- `parsePatterns(str)` — Parses comma-separated glob string into array once; returns `null` for empty. Used by `applyMinimatchFilter` and `fsGrep` to avoid repeated splitting in loops.
 - `waitForScan(scanPromise, timeoutMs)` — Race between scan completion and timeout, never throws
 - `safeLog(client, level, message)` — Logging that never throws
 - `__test()` — Single function export that returns all internal functions for testing; prevents `getLegacyPlugins()` from calling each named export as a separate plugin server (Bun-on-Windows fix)
@@ -97,14 +99,26 @@ All features are enabled for maximum search performance. The bigram content inde
 
 ```javascript
 const SKIP_DIRS = new Set([
-  ".git", "node_modules", ".hg", ".svn",
-  "__pycache__", ".cache", "dist", ".next",
-  "coverage", ".nyc_output", "build", "out",
-  ".nuxt", ".output", ".vercel", ".terraform",
-])
+  ".git",
+  "node_modules",
+  ".hg",
+  ".svn",
+  "__pycache__",
+  ".cache",
+  "dist",
+  ".next",
+  "coverage",
+  ".nyc_output",
+  "build",
+  "out",
+  ".nuxt",
+  ".output",
+  ".vercel",
+  ".terraform",
+]);
 ```
 
-`loadGitignoreFilter(basePath)` reads `.gitignore` from disk and extracts simple directory-name
+`loadGitignoreFilter(basePath)` reads `.gitignore` from disk (async, via `fsPromises.readFile`) and extracts simple directory-name
 patterns (e.g., `vendor/`, `generated/`) into the skip set. Results are cached per `basePath`.
 
 `globWalk` and `fsGrep` skip all dot-prefixed directories (except the search root).
@@ -186,25 +200,35 @@ tool({
   },
   async execute(args, context) {
     // 1. Validate + abort check
-    if (!args.pattern || typeof args.pattern !== "string" || args.pattern.trim() === "")
-      throw new Error("pattern must be a non-empty string")
-    if (context.abort.aborted) throw new Error("Aborted")
+    if (
+      !args.pattern ||
+      typeof args.pattern !== "string" ||
+      args.pattern.trim() === ""
+    )
+      throw new Error("pattern must be a non-empty string");
+    if (context.abort.aborted) throw new Error("Aborted");
 
     // 2. Wait for scan
-    await waitForScan(scanPromise, TOOL_TIMEOUT_MS)
-    if (context.abort.aborted) throw new Error("Aborted")
+    await waitForScan(scanPromise, TOOL_TIMEOUT_MS);
+    if (context.abort.aborted) throw new Error("Aborted");
 
     // 3. Detect single-file vs directory search
-    let resolvedFilePath = null
+    let resolvedFilePath = null;
     if (args.path) {
-      const resolvedPath = resolvePath(directory, args.path)
-      if (existsSync(resolvedPath) && statSync(resolvedPath).isFile()) resolvedFilePath = resolvedPath
+      const resolvedPath = resolvePath(directory, args.path);
+      if (existsSync(resolvedPath) && statSync(resolvedPath).isFile())
+        resolvedFilePath = resolvedPath;
     }
 
     // 4. Execute search
-    let matches
+    let matches;
     if (resolvedFilePath) {
-      matches = directFileGrep(resolvedFilePath, directory, args.pattern, ctxLines)
+      matches = directFileGrep(
+        resolvedFilePath,
+        directory,
+        args.pattern,
+        ctxLines,
+      );
     } else {
       // ... routing logic (see Data Flow above)
     }
@@ -212,23 +236,27 @@ tool({
     // 5. Post-filter by path, exclude
     // 6. Sort by mtime, apply limit
     // 7. Return { title, output, metadata }
-    return { title: args.pattern, metadata: { matches: total, truncated }, output: output.join("\n") }
+    return {
+      title: args.pattern,
+      metadata: { matches: total, truncated },
+      output: output.join("\n"),
+    };
   },
-})
+});
 ```
 
 ### Error Handling
 
 ```javascript
 try {
-  const result = finder.grep(args.pattern, { mode, smartCase: true })
+  const result = finder.grep(args.pattern, { mode, smartCase: true });
   if (!result.ok) {
-    await safeLog(client, "error", `fff grep error: ${result.error}`)
-    throw new Error(`fff grep error: ${result.error}`)
+    await safeLog(client, "error", `fff grep error: ${result.error}`);
+    throw new Error(`fff grep error: ${result.error}`);
   }
 } catch (err) {
-  await safeLog(client, "error", `grep error: ${err.message}`)
-  throw err
+  await safeLog(client, "error", `grep error: ${err.message}`);
+  throw err;
 }
 ```
 
@@ -243,6 +271,7 @@ Use structured logging via `client.app.log()`. Keep logs minimal — only initia
 The plugin extends the upstream OpenCode tool contracts:
 
 **grep** ([upstream source](https://github.com/anomalyco/opencode/blob/main/packages/opencode/src/tool/grep.ts)):
+
 - Upstream: 3 parameters (`pattern`, `path`, `include`)
 - **Extensions**: `exclude` (post-filter), `caseSensitive` (overrides smart case), `context` (fff native), `limit` (configurable 1–5000)
 - Uses `detectGrepMode()` to choose `"plain"` (SIMD) vs `"regex"` mode
@@ -252,6 +281,7 @@ The plugin extends the upstream OpenCode tool contracts:
 - Truncation notice: `(Results are truncated: showing first ${limit} results ...)`
 
 **glob** ([upstream source](https://github.com/anomalyco/opencode/blob/main/packages/opencode/src/tool/glob.ts)):
+
 - Upstream: 2 parameters (`pattern`, `path`)
 - **Extensions**: `type` (file/directory), `limit` (configurable 1–5000)
 - Metachar patterns: fff fuzzy + minimatch post-filter + `globWalk` fallback
@@ -267,31 +297,37 @@ The plugin extends the upstream OpenCode tool contracts:
 
 ```javascript
 // Correct
-return { title: args.pattern, metadata: { matches: total, truncated }, output: output.join("\n") }
+return {
+  title: args.pattern,
+  metadata: { matches: total, truncated },
+  output: output.join("\n"),
+};
 
 // Incorrect — TUI shows no match count
-return lines.join('\n')
+return lines.join("\n");
 ```
 
 ### Path Handling
 
 Matches upstream behavior:
+
 - **Absolute paths** — resolved as-is, then converted to relative for filtering
 - **Relative paths** — joined with workspace `directory`
 - **Falsy/omitted** — uses workspace `directory`
 
 ```javascript
 function resolvePath(directory, p) {
-  if (!p) return directory
-  if (isAbsolute(p)) return p
-  return join(directory, p)
+  if (!p) return directory;
+  if (isAbsolute(p)) return p;
+  return join(directory, p);
 }
 ```
 
 ### Smart Mode Detection (`detectGrepMode`)
 
 ```javascript
-const REGEX_METACHAR_RE = /\\[sdwnbtDSWNBT]|\\|\||\[\^?\]|\[\^?[^\]]+\]|\\\+|\\\*|\\\?|[\^\$]/;
+const REGEX_METACHAR_RE =
+  /\\[sdwnbtDSWNBT]|\\|\||\[\^?\]|\[\^?[^\]]+\]|\\\+|\\\*|\\\?|[\^\$]/;
 ```
 
 Patterns with `\s`, `\d`, `|`, `[abc]`, `^`, `$`, etc. → `"regex"` mode.
@@ -307,22 +343,28 @@ The `exclude` parameter matches against **both** `relativePath` and `fileName`. 
 
 ```javascript
 if (args.exclude) {
-  const patterns = args.exclude.split(",").map((p) => p.trim()).filter(Boolean)
-  matches = matches.filter((m) =>
-    !patterns.some((pat) =>
-      minimatch(m.relativePath, pat, { dot: true }) ||
-      minimatch(m.fileName, pat, { dot: true })
-    )
-  )
+  const patterns = args.exclude
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  matches = matches.filter(
+    (m) =>
+      !patterns.some(
+        (pat) =>
+          minimatch(m.relativePath, pat, { dot: true }) ||
+          minimatch(m.fileName, pat, { dot: true }),
+      ),
+  );
 }
 ```
 
 ### Glob Tool: Glob vs Fuzzy Routing
 
 The glob tool detects whether the pattern contains glob metacharacters (`*`, `?`, `[`):
+
 - **Glob patterns + type=directory** — skips fff's `directorySearch` (which is fuzzy, not glob-aware) and uses `globWalk` directly for proper minimatch matching
 - **Glob patterns + type=file** → fff fuzzy search → minimatch post-filter → `globWalk` fallback
-  - `globWalk()` uses recursive `readdirSync` + `minimatch`
+  - `globWalk()` uses recursive `fsPromises.readdir` + `minimatch`
   - Supports recursive `**/`, brace expansion (`*.{ts,js}`), and character classes via `minimatch`
   - Directory matching checks both `relativePath` and `entry.name` so `*` matches nested dirs
 - **Fuzzy queries** (`helpers`, `config`) → fff `fileSearch()` / `directorySearch()` → `globWalk` fallback
@@ -337,8 +379,11 @@ fff's `directorySearch` and `fileSearch` may return items with `path` instead of
 ```javascript
 items = (result.value?.items || []).map((item) => ({
   relativePath: item.relativePath || item.path || "",
-  fileName: item.fileName || (item.relativePath || item.path || "").split("/").pop() || "",
-}))
+  fileName:
+    item.fileName ||
+    (item.relativePath || item.path || "").split("/").pop() ||
+    "",
+}));
 ```
 
 This prevents `undefined.split()` crashes in downstream `minimatch`/`filterByPath`/`join` calls.
@@ -365,18 +410,23 @@ All fff features are enabled in `FileFinder.create()`:
 ### Known Limitations
 
 #### Turkish/Unicode Overcount (Solved)
+
 fff's search engine performs Unicode normalization that maps `ş` (U+015F) to ASCII `s`, inflating match counts for Turkish patterns. The plugin detects non-ASCII patterns via `/[^\x00-\x7F]/` and routes them to `fsGrep` — a file-level read with exact Unicode regex (`giu` flags). Patterns containing characters like `ş`, `ı`, `İ`, `ğ`, `ü`, `ö`, `ç` produce exact counts matching bash `grep`.
 
 #### Case-Insensitive Matching for Turkish Uppercase (fff Limitation)
+
 fff's case folding is ASCII-only. When `smartCase` is enabled and the pattern is uppercase (e.g., `ISTANBUL`), fff performs case-sensitive matching and won't find Turkish title-case text like `İstanbul` because `I` ≠ `İ` in ASCII. **Workaround**: Use lowercase patterns for case-insensitive search (e.g., `istanbul` matches `İstanbul`). For exact uppercase Turkish matching, use `caseSensitive: true` with the exact Unicode pattern.
 
 #### Regex Support (Basic)
+
 fff supports basic regex: character classes (`[abc]`), quantifiers (`+`, `*`, `?`), alternation (`|`), anchors (`^`, `$`), escaped classes (`\s`, `\d`, `\w`). Advanced PCRE features are **not** supported: non-capturing groups (`(?:...)`), inline flags (`(?i)`), look-ahead/behind, backreferences. Use the `caseSensitive` parameter instead of inline flags.
 
 #### Keyword Search (Inherent fff Limitation)
+
 fff's grep indexes symbol tokens (identifiers, component names) but not language keywords (`import`, `const`, `return`, `export`). Plugin cannot override this for ASCII patterns. For keyword search, agents should fall back to bash `grep`/`rg`.
 
 #### Grep Recall Gap (Mitigated)
+
 fff's grep engine does not guarantee 100% recall across all files — coverage is high for symbol names and identifiers but inconsistent for short/common words. Not related to file size or content type.
 
 **Mitigation**: When `path` points to a specific file, the plugin reads it directly for 100% recall (`directFileGrep`). For non-ASCII patterns, `fsGrep` provides exact file-level coverage. For directory-wide ASCII searches, the plugin auto-falls back to `fsGrep` when fff returns zero results. For guaranteed 100% recall, agents should fall back to bash `grep`/`rg`.
@@ -388,8 +438,8 @@ fff's grep engine does not guarantee 100% recall across all files — coverage i
 ### Shared scanPromise Pattern
 
 ```javascript
-const scanPromise = finder.waitForScan(SCAN_TIMEOUT_MS).catch(() => undefined)
-scanPromise.then(() => safeLog(client, "info", "Initial fff scan complete"))
+const scanPromise = finder.waitForScan(SCAN_TIMEOUT_MS).catch(() => undefined);
+scanPromise.then(() => safeLog(client, "info", "Initial fff scan complete"));
 ```
 
 ### Abort Handling
@@ -397,35 +447,35 @@ scanPromise.then(() => safeLog(client, "info", "Initial fff scan complete"))
 Check `context.abort.aborted` at start and after async operations:
 
 ```javascript
-if (context.abort.aborted) throw new Error("Aborted")
-await waitForScan(scanPromise, TOOL_TIMEOUT_MS)
-if (context.abort.aborted) throw new Error("Aborted")
+if (context.abort.aborted) throw new Error("Aborted");
+await waitForScan(scanPromise, TOOL_TIMEOUT_MS);
+if (context.abort.aborted) throw new Error("Aborted");
 ```
 
 ## Tool Parameters Reference
 
 ### grep Tool
 
-| Parameter | Type | Default | Notes |
-|-----------|------|---------|-------|
-| `pattern` | string (required) | — | Search pattern (regex or literal text) |
-| `path` | string (optional) | — | File or directory to search in (absolute or relative) |
-| `include` | string (optional) | — | File pattern to include (e.g., `"*.vue"`, `"*.{ts,tsx}"`) |
-| `exclude` | string (optional) | — | Comma-separated glob patterns to exclude |
-| `caseSensitive` | boolean (optional) | `false` | Override smart case. `true` = always case-sensitive. |
-| `context` | number (optional) | `0` | Context lines before/after each match |
-| `limit` | number (optional) | `100` | Max matches to return (1–5000) |
+| Parameter       | Type               | Default | Notes                                                     |
+| --------------- | ------------------ | ------- | --------------------------------------------------------- |
+| `pattern`       | string (required)  | —       | Search pattern (regex or literal text)                    |
+| `path`          | string (optional)  | —       | File or directory to search in (absolute or relative)     |
+| `include`       | string (optional)  | —       | File pattern to include (e.g., `"*.vue"`, `"*.{ts,tsx}"`) |
+| `exclude`       | string (optional)  | —       | Comma-separated glob patterns to exclude                  |
+| `caseSensitive` | boolean (optional) | `false` | Override smart case. `true` = always case-sensitive.      |
+| `context`       | number (optional)  | `0`     | Context lines before/after each match                     |
+| `limit`         | number (optional)  | `100`   | Max matches to return (1–5000)                            |
 
 **Output format**: `relativePath:lineNumber:lineContent` (one line per match). Context lines rendered before/after match with correct line numbers when `context > 0`.
 
 ### glob Tool
 
-| Parameter | Type | Default | Notes |
-|-----------|------|---------|-------|
-| `pattern` | string (required) | — | Glob pattern or fuzzy query |
-| `path` | string (optional) | — | Directory to search in (absolute or relative) |
-| `type` | "file" or "directory" (optional) | "file" | Filter by type |
-| `limit` | number (optional) | `100` | Max results to return (1–5000) |
+| Parameter | Type                             | Default | Notes                                         |
+| --------- | -------------------------------- | ------- | --------------------------------------------- |
+| `pattern` | string (required)                | —       | Glob pattern or fuzzy query                   |
+| `path`    | string (optional)                | —       | Directory to search in (absolute or relative) |
+| `type`    | "file" or "directory" (optional) | "file"  | Filter by type                                |
+| `limit`   | number (optional)                | `100`   | Max results to return (1–5000)                |
 
 **Output format**: newline-separated absolute file paths
 
@@ -500,7 +550,7 @@ See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md).
 `path.join()` **concatenates** segments when the second argument is absolute, producing a non-existent merged path:
 
 ```js
-join("/home/user", "/absolute/path/to/dir")
+join("/home/user", "/absolute/path/to/dir");
 // → "/home/user/absolute/path/to/dir"   ← wrong!
 ```
 
@@ -509,22 +559,23 @@ Always use the existing `resolvePath()` helper (index.js:103) which short-circui
 ```js
 function resolvePath(directory, p) {
   if (!p) return directory;
-  if (isAbsolute(p)) return p;   // absolute paths returned as-is
+  if (isAbsolute(p)) return p; // absolute paths returned as-is
   return join(directory, p);
 }
 ```
 
 This bug appeared in **two separate PRs** (#1 and #3), both in the `fsGrep` fallback path. Future edits to path resolution should use `resolvePath()` and never call `join(directory, args.path)` directly.
 
-### `fsGrep` performs synchronous I/O — add a `limit` guard early
+### `fsGrep` uses async I/O — add a `limit` guard early
 
-`fsGrep` walks directories with `readdirSync` and reads files with `readFileSync`. For a common short pattern (e.g. `fn`, `pub`, `use`) the bigram content index in fff returns zero results, the `fsGrep` failsafe fires, and it can block the event loop scanning every file in a directory.
+`fsGrep` walks directories with `fsPromises.readdir` and reads files with `fsPromises.readFile`. For a common short pattern (e.g. `fn`, `pub`, `use`) the bigram content index in fff returns zero results, the `fsGrep` failsafe fires, and it can take a long time scanning every file in a directory.
 
 **Fix**: `fsGrep` now accepts an optional `limit` parameter and returns early when `results.length >= limit`. All three call sites (Unicode fallback, outside-index fallback, failsafe fallback) pass `limit` through. When calling `fsGrep`, always pass the caller's `limit` so the early-return guard works correctly.
 
 ### The `fsGrep` failsafe is the last-resort fallback — not first choice
 
-`fsGrep` is intentionally slow (sync I/O). It should only be reached through:
+`fsGrep` is intentionally slow (directory-level async I/O). It should only be reached through:
+
 - Unicode/Non-ASCII patterns (`/[^\x00-\x7F]/`) — forced `fsGrep` route
 - Outside-index paths — `args.path` outside the indexed directory
 - Zero-result failsafe — fff returned nothing, recurse to `fsGrep`
@@ -540,19 +591,20 @@ When adding a parameter like `limit` to the grep tool, check [upstream source](h
 ### Rust binary panic: `grep.rs:2110` slice out-of-bounds in `@ff-labs/fff-node@0.7.0`
 
 The fff-core Rust binary v0.7.0 (and v0.7.1/v0.7.2) contains a known bug at `grep.rs:2110`:
-`for f in &files[overflow_start..]` where `overflow_start > files.len()`.  This
+`for f in &files[overflow_start..]` where `overflow_start > files.len()`. This
 triggers a process-fatal Rust panic (OS-level SIGABRT / segfault) — no JS catch
 possible — when the bigram overlay's `base_file_count()` (recorded at index-build
 time) disagrees with the current `files.len()` (after files are deleted).
 
 **Trigger in tests**: the "should cache finder instance per directory" test called
 `createTempProject()` which internally calls `cleanupTempProject(tmpDir)`, deleting
-the shared test directory (`tmpDir`).  When the next `before()` hook tried to
+the shared test directory (`tmpDir`). When the next `before()` hook tried to
 rebuild `tmpDir` but the Rust overlay still held the stale `overflow_start == 9`,
 `findFiles()` returned an empty list and the slice `files[9..]` on a zero-length
 slice panicked the binary.
 
 **Workaround (in JS / tests)**:
+
 - **index.js** `existsSync(fallbackDir)` guard (line 555): prevents `fsGrep`
   from walking a directory that has been deleted between the overlay state
   being recorded and it being read on disk.
@@ -560,28 +612,28 @@ slice panicked the binary.
   3 times with exponential backoff, which mitigates overlay staleness races.
 - **Test fix**: the "cache finder" test now uses its own `freshDir` with
   `rmSync` instead of `createTempProject()`/`cleanupTempProject()` which
-  would delete the shared `tmpDir`.  This eliminates the race entirely.
+  would delete the shared `tmpDir`. This eliminates the race entirely.
 
 **Upstream fix pending**: fff-core main branch now has
 `overflow_start = min(overflow_start, files.len())` at the boundary assignment
 (`grep.rs:2103`), but this fix has not been released in any published version
-as of this writing.  Update `@ff-labs/fff-node` to `>=0.8.2` when it ships
+as of this writing. Update `@ff-labs/fff-node` to `>=0.8.2` when it ships
 a crate version that backports this clamp.
 
 ### `getLegacyPlugins()` calls every named export as a separate plugin server
 
 OpenCode's plugin loader calls `getLegacyPlugins(mod)` which iterates
 `Object.values(mod)` and invokes each function-valued export with
-`(input, options)` as if it were a standalone plugin `server()`.  When a named
+`(input, options)` as if it were a standalone plugin `server()`. When a named
 export like `fsGrep` or `loadGitignoreFilter` is called with `(input, options)`,
 the arguments are `PluginInput` (object) and plugin metadata (object), not the
-intended positional parameters.  This is harmless for most functions (they return
+intended positional parameters. This is harmless for most functions (they return
 early or catch), but under Bun-on-Windows, one such internal call triggers the
 `paths[1]` CJS interop bug during `require.resolve` deep within the Bun runtime.
 
 **Fix**: Replace individual named exports (`export { fsGrep, detectGrepMode, ... }`)
 with a single `export async function __test() {}` that returns an object containing
-all internal functions.  This way `getLegacyPlugins()` sees exactly one function
+all internal functions. This way `getLegacyPlugins()` sees exactly one function
 export — `__test` — and calling it has no side effect.
 
 ## Common Gotchas
@@ -600,8 +652,8 @@ export — `__test` — and calling it has no side effect.
 12. **type=directory**: Glob tool supports `type="directory"` for both glob patterns and fuzzy queries. Metachar patterns with `type=directory` skip fff and use `globWalk` directly (fff's `directorySearch` is fuzzy, not glob-aware). Directory matching checks both `relativePath` and `entry.name` so `*` matches nested directories.
 13. **globWalk fallback**: Triggers for ALL empty-result cases (not just metachar patterns). For non-metachar patterns, also augments fff's fuzzy results when no exact basename match exists (e.g., `temp.ts` pattern where fff returns 100 fuzzy `.ts` files but none is `temp.ts`). Handles `type="directory"`, Unicode filenames, and fff index gaps.
 14. **Item normalization**: fff `directorySearch` may return items with `path` instead of `relativePath`. The plugin normalizes all items to prevent `undefined.split()` crashes.
-15. **fsGrep for non-ASCII**: Patterns with Turkish/Unicode characters (`ş`, `ı`, `İ`) route via `/[^\x00-\x7F]/` to `fsGrep`, which reads files with Node.js `readFileSync` and exact Unicode regex (`giu`). This avoids fff's `ş↔s` normalization overcount. The `fsGrep` path applies include/exclude during the walk — no double filtering.
-16. **loadGitignoreFilter**: `fsGrep` and `globWalk` parse `.gitignore` to augment `SKIP_DIRS` with directory-name entries. Cached per basePath. Dot-prefixed dirs are always skipped. fff's own index also respects `.gitignore` natively via the Rust `ignore` crate.
+15. **fsGrep for non-ASCII**: Patterns with Turkish/Unicode characters (`ş`, `ı`, `İ`) route via `/[^\x00-\x7F]/` to `fsGrep`, which reads files with `fsPromises.readFile` and exact Unicode regex (`giu`). This avoids fff's `ş↔s` normalization overcount. The `fsGrep` path applies include/exclude during the walk — no double filtering.
+16. **loadGitignoreFilter**: `fsGrep` and `globWalk` parse `.gitignore` to augment `SKIP_DIRS` with directory-name entries. Async — uses `fsPromises.readFile`; cached per basePath. Dot-prefixed dirs are always skipped. fff's own index also respects `.gitignore` natively via the Rust `ignore` crate.
 17. **Pagination**: `fetchGrepPages` uses dynamic `maxPages = ceil(limit/50) + 2` instead of fixed `MAX_GREP_PAGES`. fff's `pageLimit` is hardcoded to 50 in `finder.ts` and not exposed via `GrepOptions`.
 18. **Context rendering**: When `context > 0`, the output loop renders `contextBefore` lines (with correct line numbers before the match), the match line itself, then `contextAfter` lines. Both fff grep items and `directFileGrep`/`fsGrep` items carry `contextBefore`/`contextAfter` arrays.
 19. **Test directory deletion can trigger a Rust panic**: `createTempProject()` internally calls `cleanupTempProject(tmpDir)` which deletes the shared test directory. If another test's `before()` hook then tries to rebuild that directory while the Rust overlay's `base_file_count()` is stale (higher than `files.len()`), calling `finder.grep()` inside `fetchGrepPages` will reach `files[overflow_start..]` with `overflow_start > files.len()` — a process-fatal slice panic (`grep.rs:2110`) that cannot be caught in JS. Workaround: never delete `tmpDir` from within a test. Use an isolated directory (e.g. `rmSync` a fresh unique path) so the shared test directory is untouched. The JS-side guards (`existsSync(fallbackDir)` in `fsGrep` failsafe, `totalFilesSearched === 0` retry in `fetchGrepPages`) reduce the blast radius but cannot prevent this specific panic.
@@ -611,6 +663,7 @@ export — `__test` — and calling it has no side effect.
 ## Dependencies
 
 ### Runtime
+
 - `@ff-labs/fff-node` ^0.8.1 - Core search engine for Node.js (Rust wrapper via `ffi-rs`)
 - `@ff-labs/fff-bun` ^0.8.4 - Core search engine for Bun runtime (uses `bun:ffi`, no CJS deps)
 - `minimatch` ^10.2.5 - Glob pattern matching for exclude parameter and `globWalk`
@@ -618,6 +671,7 @@ export — `__test` — and calling it has no side effect.
 The plugin auto-detects the runtime at load time using `typeof Bun !== "undefined"` and imports the appropriate package. Both are listed as dependencies so they're always available.
 
 ### Peer Dependencies
+
 - `@opencode-ai/plugin` ^1.14.28 - OpenCode plugin SDK
 
 ```

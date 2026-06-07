@@ -7,7 +7,7 @@ OpenCode plugin that replaces the default `grep` and `glob` file search tools wi
 - **Drop-in replacement** — Overrides OpenCode's built-in `grep` and `glob` tools
 - **Blazing fast** — In-memory index, searches complete in milliseconds
 - **Smart mode detection** — Automatically detects regex vs plain patterns; plain mode uses SIMD-accelerated literal matching
-- **Full-text search** — Reads file contents directly for patterns with non-ASCII characters; falls back to Node.js `readFileSync` for exact Unicode matching
+- **Full-text search** — Reads file contents directly for patterns with non-ASCII characters; falls back to async Node.js file reading for exact Unicode matching
 - **Single-file 100% recall** — When `path` points to a file, reads it directly (bypasses fff index)
 - **Real glob matching** — Recursive `**/`, brace expansion `{a,b}`, character classes via `minimatch`
 - **Exact-name augmentation** — Non-glob patterns (e.g., `temp.ts`) also searched via `globWalk` when fff fuzzy results don't include an exact basename match
@@ -34,7 +34,7 @@ Add to your `opencode.json` or `opencode.jsonc`:
 
 ```jsonc
 {
-  "plugin": ["opencode-fff-search"]
+  "plugin": ["opencode-fff-search"],
 }
 ```
 
@@ -90,12 +90,12 @@ opencode-fff-search/
 
 The plugin uses hardcoded defaults with all fff features enabled:
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `aiMode` | `true` | Frecency scoring (uses LMDB). Improves recall and ranking over time. |
-| `disableMmapCache` | `false` | Memory-map file cache enabled for speed. |
+| Option                   | Default | Description                                                                                                                             |
+| ------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `aiMode`                 | `true`  | Frecency scoring (uses LMDB). Improves recall and ranking over time.                                                                    |
+| `disableMmapCache`       | `false` | Memory-map file cache enabled for speed.                                                                                                |
 | `disableContentIndexing` | `false` | Bigram inverted index enabled. Pre-filters files before grep, eliminating 80-95% that can't match. Speeds up grep 5-20x on large repos. |
-| `disableWatch` | `false` | File system watcher enabled. Detects new/deleted files mid-session. |
+| `disableWatch`           | `false` | File system watcher enabled. Detects new/deleted files mid-session.                                                                     |
 
 All features are enabled for maximum search performance. The bigram content index pre-filters files before opening them — it does not affect recall, only eliminates files that cannot match.
 
@@ -107,12 +107,12 @@ This plugin overrides OpenCode's built-in `grep` and `glob` tools with fff's tex
 
 Four search paths, selected automatically:
 
-| Condition | Strategy | Recall |
-|-----------|----------|--------|
-| `path` points to a file | `directFileGrep` — Node.js `readFileSync` | 100% |
-| Non-ASCII pattern (Turkish/Unicode) | `fsGrep` — directory walk + Unicode regex (`u` flag) | 100% |
-| `path` outside indexed workspace | `fsGrep` — filesystem-level grep | 100% |
-| ASCII pattern in indexed dir | fff indexed search (regex/plain + smart case) | ~90%+ |
+| Condition                           | Strategy                                             | Recall |
+| ----------------------------------- | ---------------------------------------------------- | ------ |
+| `path` points to a file             | `directFileGrep` — Node.js async file read           | 100%   |
+| Non-ASCII pattern (Turkish/Unicode) | `fsGrep` — directory walk + Unicode regex (`u` flag) | 100%   |
+| `path` outside indexed workspace    | `fsGrep` — filesystem-level grep                     | 100%   |
+| ASCII pattern in indexed dir        | fff indexed search (regex/plain + smart case)        | ~90%+  |
 
 **fff fallback chain**: If fff returns zero results, the plugin retries with regex mode (if plain failed), then falls back to `fsGrep` for guaranteed coverage.
 
@@ -124,10 +124,10 @@ Results are frecency-ranked by fff (most recently/frequently used first). Limite
 
 ### `glob` Tool
 
-| Pattern type | Strategy |
-|--------------|----------|
-| Glob metacharacters (`*`, `?`, `[`) | fff fuzzy search + minimatch post-filter → `globWalk` fallback |
-| Fuzzy query (no metacharacters) | fff's `fileSearch` / `directorySearch` → `globWalk` augmentation if no exact match |
+| Pattern type                        | Strategy                                                                           |
+| ----------------------------------- | ---------------------------------------------------------------------------------- |
+| Glob metacharacters (`*`, `?`, `[`) | fff fuzzy search + minimatch post-filter → `globWalk` fallback                     |
+| Fuzzy query (no metacharacters)     | fff's `fileSearch` / `directorySearch` → `globWalk` augmentation if no exact match |
 
 - Items from fff are normalized (both `relativePath` and `fileName` always present)
 - `type="directory"` with glob metacharacters (`*`, `?`, `[`) routes directly to `globWalk` (fff's `directorySearch` is fuzzy, not glob-aware). Without metacharacters, `finder.directorySearch()` is used instead.
@@ -162,18 +162,23 @@ Plus all dot-prefixed directories (except the search root).
 ### Known Limitations
 
 #### Turkish/Unicode Overcount (Solved)
+
 fff's search engine performs Unicode normalization that maps `ş` (U+015F) to ASCII `s`, inflating match counts for Turkish patterns. The plugin detects non-ASCII patterns and routes them to `fsGrep` — a file-level read with exact Unicode regex matching. Patterns containing characters like `ş`, `ı`, `İ`, `ğ`, `ü`, `ö`, `ç` produce counts matching bash `grep` exactly.
 
 #### Case-Insensitive Matching for Turkish Uppercase (fff Limitation)
+
 fff's case folding is ASCII-only. When `smartCase` is enabled and the pattern is uppercase (e.g., `ISTANBUL`), fff performs case-sensitive matching and won't find Turkish title-case text like `İstanbul` because `I` ≠ `İ` in ASCII. **Workaround**: Use lowercase patterns for case-insensitive search (e.g., `istanbul` matches `İstanbul`). For exact uppercase Turkish matching, use `caseSensitive: true` with the exact Unicode pattern.
 
 #### Regex Support (Basic)
+
 fff supports basic regex: character classes (`[abc]`), quantifiers (`+`, `*`, `?`), alternation (`|`), anchors (`^`, `$`), escaped classes (`\s`, `\d`, `\w`). Advanced PCRE features are **not** supported: non-capturing groups (`(?:...)`), inline flags (`(?i)`), look-ahead/behind, backreferences. Use the `caseSensitive` parameter instead of inline flags.
 
 #### Keyword Search (Inherent fff Limitation)
+
 fff's grep indexes symbol tokens (identifiers, component names) but not language keywords (`import`, `const`, `return`, `export`). The plugin cannot override this for ASCII patterns. For keyword search, use bash `grep`/`rg` directly.
 
 #### Grep Recall Gap (Mitigated)
+
 fff's grep engine does not guarantee 100% recall across all files — coverage is high for symbol names and identifiers but inconsistent for short/common words.
 
 **Mitigation:** When `path` points to a specific file, the plugin reads it directly for guaranteed 100% recall (`directFileGrep`). For non-ASCII patterns, filesystem-level reading also provides exact coverage. For directory-wide ASCII searches requiring 100% recall, the plugin auto-falls back to `fsGrep`. If still incomplete, use bash `grep`/`rg`.
@@ -184,15 +189,15 @@ fff's grep engine does not guarantee 100% recall across all files — coverage i
 
 Fast content search with full-text matching.
 
-| Parameter | Type | Required? | Default | Description |
-|-----------|------|-----------|---------|-------------|
-| `pattern` | `string` | Yes | — | Search pattern (regex or literal text) |
-| `path` | `string` | No | — | File or directory to search in. Absolute or relative to workspace root. |
-| `include` | `string` | No | — | File pattern to include (e.g., `"*.vue"`, `"*.{ts,tsx}"`). Matches basename or full path. |
-| `exclude` | `string` | No | — | Comma-separated glob patterns to exclude (e.g., `"*.test.ts,*.spec.ts"`) |
-| `caseSensitive` | `boolean` | No | `false` | Override smart case. `true` = always case-sensitive. |
-| `context` | `number` | No | `0` | Number of context lines before/after each match |
-| `limit` | `number` | No | `100` | Maximum total matches to return (1–5000) |
+| Parameter       | Type      | Required? | Default | Description                                                                               |
+| --------------- | --------- | --------- | ------- | ----------------------------------------------------------------------------------------- |
+| `pattern`       | `string`  | Yes       | —       | Search pattern (regex or literal text)                                                    |
+| `path`          | `string`  | No        | —       | File or directory to search in. Absolute or relative to workspace root.                   |
+| `include`       | `string`  | No        | —       | File pattern to include (e.g., `"*.vue"`, `"*.{ts,tsx}"`). Matches basename or full path. |
+| `exclude`       | `string`  | No        | —       | Comma-separated glob patterns to exclude (e.g., `"*.test.ts,*.spec.ts"`)                  |
+| `caseSensitive` | `boolean` | No        | `false` | Override smart case. `true` = always case-sensitive.                                      |
+| `context`       | `number`  | No        | `0`     | Number of context lines before/after each match                                           |
+| `limit`         | `number`  | No        | `100`   | Maximum total matches to return (1–5000)                                                  |
 
 **Output format:** `relativePath:lineNumber:lineContent` (one line per match). When `context > 0`, context lines before/after each match are included with their correct line numbers.
 
@@ -206,12 +211,12 @@ Default limit 100, max 5000. Results are frecency-ranked by fff (most recently/f
 
 Fast file pattern matching with glob + fuzzy support.
 
-| Parameter | Type | Required? | Default | Description |
-|-----------|------|-----------|---------|-------------|
-| `pattern` | `string` | Yes | — | Glob pattern (`**/*.ts`) or fuzzy query (`helpers`) |
-| `path` | `string` | No | — | Directory to search in. Absolute or relative to workspace root. |
-| `type` | `"file" \| "directory"` | No | `"file"` | Filter results by type |
-| `limit` | `number` | No | `100` | Maximum number of results (1–5000) |
+| Parameter | Type                    | Required? | Default  | Description                                                     |
+| --------- | ----------------------- | --------- | -------- | --------------------------------------------------------------- |
+| `pattern` | `string`                | Yes       | —        | Glob pattern (`**/*.ts`) or fuzzy query (`helpers`)             |
+| `path`    | `string`                | No        | —        | Directory to search in. Absolute or relative to workspace root. |
+| `type`    | `"file" \| "directory"` | No        | `"file"` | Filter results by type                                          |
+| `limit`   | `number`                | No        | `100`    | Maximum number of results (1–5000)                              |
 
 **Glob vs fuzzy:** Patterns containing `*`, `?`, or `[` use real glob matching with minimatch. Others use fff's fuzzy file finder.
 
@@ -221,37 +226,42 @@ Fast file pattern matching with glob + fuzzy support.
 
 On a 48K-file repo (nodejs/node):
 
-| Operation | ripgrep (spawn) | fff (in-memory) |
-|-----------|-----------------|------------------|
-| Single grep | ~45ms | ~15ms |
-| Single glob | ~3ms | ~6ms (glob walk) / ~2ms (fuzzy) |
-| 100 grep searches | ~5min | <1s |
+| Operation         | ripgrep (spawn) | fff (in-memory)                 |
+| ----------------- | --------------- | ------------------------------- |
+| Single grep       | ~45ms           | ~15ms                           |
+| Single glob       | ~3ms            | ~6ms (glob walk) / ~2ms (fuzzy) |
+| 100 grep searches | ~5min           | <1s                             |
 
 > Benchmarks observed in local development; not produced by automated test assertions. Performance will vary by repo size and hardware.
 
 ## Platform-Specific Notes
 
 ### Windows
+
 - **WSL recommended** for best OpenCode experience
 - fff binary: `@ff-labs/fff-bin-win32-x64` (or `-arm64` for ARM)
 - Bun-on-Windows known issue resolved: internal functions now wrapped under a single `__test()` export to avoid the `getLegacyPlugins()` `paths[1]` CJS interop bug
 
 ### macOS
+
 - Works on both Intel (`x64`) and Apple Silicon (`arm64`)
 - fff binaries auto-download via npm optional dependencies
 
 ### Linux
+
 - Multiple variants supported (GNU, musl)
 - Auto-detects correct binary via npm optional dependencies
 
 ## Troubleshooting
 
 ### Plugin not loading
+
 - Ensure plugin file is in correct `plugins/` directory
 - Verify dependencies: `ls ~/.config/opencode/node_modules/@ff-labs/fff-node`
 - For development, symlink for live updates: `ln -sf $(pwd)/index.js ~/.config/opencode/plugins/opencode-fff-search.js`
 
 ### Plugin not updating after upgrade
+
 If installed via `opencode.json` (`"plugin": ["opencode-fff-search"]`), delete the cached copy to force re-install:
 
 ```bash
@@ -274,9 +284,11 @@ npm install @ff-labs/fff-bin-win32-x64
 ```
 
 ### Missing search results (recall gap)
+
 fff's grep may not find matches in all files when searching directories. For 100% recall, search a specific file path or use bash `grep`/`rg`.
 
 ### Glob `type=directory` returns unexpected results
+
 - `*` wildcard now correctly matches nested directories (fixed in latest)
 - `src/stores/**` returning empty is correct if `stores/` has no subdirectories — `**` requires at least one path segment to match. Use `src/**` for broader directory listing.
 
