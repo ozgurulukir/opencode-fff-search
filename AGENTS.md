@@ -73,8 +73,10 @@ glob:
 - `filterByGlob(items, pattern)` — Post-filter results by include glob pattern
 - `filterByExclude(items, exclude)` — Post-filter results by exclude glob pattern
 - `parsePatterns(str)` — Parses comma-separated glob string into array once; returns `null` for empty. Used by `applyMinimatchFilter` and `fsGrep` to avoid repeated splitting in loops.
+- `getRelativePath(directory, argsPath)` — Converts `argsPath` to relative: returns `null` if falsy, `relative(directory, argsPath)` if absolute, otherwise `argsPath` as-is. Replaces 7 duplicated ternaries.
+- `isPathInsideIndex(argsPath, directory)` — Returns `true` if `argsPath` is `null`, relative, or an absolute path inside `directory`. Used to decide whether fff can handle the search or `fsGrep` is needed.
 - `waitForScan(scanPromise, timeoutMs)` — Race between scan completion and timeout, never throws
-- `safeLog(client, level, message)` — Logging that never throws
+- `safeLog(client, level, message)` — Logging that never throws; logs to `console.error` as fallback when `client.app.log` fails
 - `__test()` — Single function export that returns all internal functions for testing; prevents `getLegacyPlugins()` from calling each named export as a separate plugin server (Bun-on-Windows fix)
 
 ### Configuration
@@ -320,6 +322,17 @@ function resolvePath(directory, p) {
   if (!p) return directory;
   if (isAbsolute(p)) return p;
   return join(directory, p);
+}
+
+function getRelativePath(directory, argsPath) {
+  if (!argsPath) return null;
+  return isAbsolute(argsPath) ? relative(directory, argsPath) : argsPath;
+}
+
+function isPathInsideIndex(argsPath, directory) {
+  if (!argsPath) return true;
+  if (!isAbsolute(argsPath)) return true;
+  return argsPath.startsWith(directory + "/") || argsPath === directory;
 }
 ```
 
