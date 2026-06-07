@@ -144,6 +144,17 @@ function resolvePath(directory, p) {
   return resolved;
 }
 
+function getRelativePath(directory, argsPath) {
+  if (!argsPath) return null;
+  return isAbsolute(argsPath) ? relative(directory, argsPath) : argsPath;
+}
+
+function isPathInsideIndex(argsPath, directory) {
+  if (!argsPath) return true;
+  if (!isAbsolute(argsPath)) return true;
+  return argsPath.startsWith(directory + "/") || argsPath === directory;
+}
+
 /**
  * Fetch grep results across multiple pages via cursor-based pagination.
  * fff-node grep() returns results one "page" of files at a time (frecency-ordered).
@@ -280,8 +291,8 @@ async function fetchGrepPages(
 async function safeLog(client, level, message) {
   try {
     await client.app.log({ body: { service: "fff-plugin", level, message } });
-  } catch {
-    // Intentionally swallowed — logging must never crash the plugin
+  } catch (e) {
+    console.error(`[fff-plugin] log failed (${level}):`, message, e?.message);
   }
 }
 
@@ -678,11 +689,7 @@ async function performGrepRouting(
       const searchDir = isAbsolute(args.path || "")
         ? args.path
         : join(directory, args.path || "");
-      const pathRel = args.path
-        ? isAbsolute(args.path)
-          ? relative(directory, args.path)
-          : args.path
-        : null;
+      const pathRel = getRelativePath(directory, args.path);
       matches = await fsGrep(
         searchDir,
         directory,
@@ -732,9 +739,7 @@ async function performGrepRouting(
         }
         // Post-filter by path
         if (args.path && matches.length > 0) {
-          const relativeTarget = isAbsolute(args.path)
-            ? relative(directory, args.path)
-            : args.path;
+          const relativeTarget = getRelativePath(directory, args.path);
           matches = filterByPath(matches, "relativePath", relativeTarget);
         }
         // Post-filter by include/exclude
@@ -746,11 +751,7 @@ async function performGrepRouting(
       if (!matches || matches.length === 0) {
         const fallbackDir = resolvePath(directory, args.path);
         if (existsSync(fallbackDir)) {
-          const pathRel = args.path
-            ? isAbsolute(args.path)
-              ? relative(directory, args.path)
-              : args.path
-            : null;
+          const pathRel = getRelativePath(directory, args.path);
           matches = await fsGrep(
             fallbackDir,
             directory,
@@ -970,11 +971,7 @@ export default async (input) => {
                   const searchDir = isAbsolute(args.path || "")
                     ? args.path
                     : join(directory, args.path || "");
-                  const pathRel = args.path
-                    ? isAbsolute(args.path)
-                      ? relative(directory, args.path)
-                      : args.path
-                    : null;
+                  const pathRel = getRelativePath(directory, args.path);
                   matches = await fsGrep(
                     searchDir,
                     directory,
@@ -987,15 +984,7 @@ export default async (input) => {
                   );
                 } else {
                   // ASCII patterns: use fff's indexed search
-                  if (
-                    finder &&
-                    !(args.path && !isAbsolute(args.path || "")
-                      ? false
-                      : args.path && isAbsolute(args.path)
-                        ? !args.path.startsWith(directory + "/") &&
-                          args.path !== directory
-                        : false)
-                  ) {
+                  if (finder && isPathInsideIndex(args.path, directory)) {
                     if (process.env.DEBUG_GREP)
                       console.error(
                         "[GREP-DEBUG] fff routing, pattern:",
@@ -1040,9 +1029,10 @@ export default async (input) => {
                   }
                   // Post-filter fff results by path
                   if (args.path && matches?.length > 0) {
-                    const relativeTarget = isAbsolute(args.path)
-                      ? relative(directory, args.path)
-                      : args.path;
+                    const relativeTarget = getRelativePath(
+                      directory,
+                      args.path,
+                    );
                     matches = filterByPath(
                       matches,
                       "relativePath",
@@ -1068,11 +1058,7 @@ export default async (input) => {
                         fallbackDir,
                       );
                     if (existsSync(fallbackDir)) {
-                      const pathRel = args.path
-                        ? isAbsolute(args.path)
-                          ? relative(directory, args.path)
-                          : args.path
-                        : null;
+                      const pathRel = getRelativePath(directory, args.path);
                       matches = await fsGrep(
                         fallbackDir,
                         directory,
@@ -1190,9 +1176,9 @@ export default async (input) => {
               const pageSize =
                 args.path || isMetachar ? Math.max(userLimit, 1000) : userLimit;
               let items;
+              const walkLimit = Math.max(userLimit, 100);
               // fff native unavailable — fall back to filesystem glob walking
               if (!finder) {
-                const walkLimit = Math.max(userLimit, 100);
                 items = await globWalk(
                   searchDir,
                   args.pattern,
@@ -1201,7 +1187,6 @@ export default async (input) => {
                   args.type,
                 );
               } else if (args.type === "directory" && isMetachar) {
-                const walkLimit = Math.max(userLimit, 100);
                 items = await globWalk(
                   searchDir,
                   args.pattern,
@@ -1264,9 +1249,7 @@ export default async (input) => {
 
               // Filter by path (convert absolute to relative so filterByPath works correctly)
               if (args.path) {
-                const relativeTarget = isAbsolute(args.path)
-                  ? relative(directory, args.path)
-                  : args.path;
+                const relativeTarget = getRelativePath(directory, args.path);
                 items = filterByPath(items, "relativePath", relativeTarget);
               }
 
@@ -1277,7 +1260,6 @@ export default async (input) => {
               // of those results is an exact basename match, globWalk finds the
               // real file. Also handles Turkish/Unicode filenames, type=directory.
               if (items.length === 0) {
-                const walkLimit = Math.max(userLimit, 100);
                 const targetType = args.type || "file";
                 items = await globWalk(
                   searchDir,
@@ -1291,7 +1273,6 @@ export default async (input) => {
                 !items.some((item) => item.fileName === args.pattern)
               ) {
                 // Fuzzy results don't include the exact file — augment with globWalk
-                const walkLimit = Math.max(userLimit, 100);
                 const targetType = args.type || "file";
                 const walkResults = await globWalk(
                   searchDir,
@@ -1358,6 +1339,8 @@ export async function __test() {
     detectGrepMode,
     filterByPath,
     resolvePath,
+    getRelativePath,
+    isPathInsideIndex,
     directFileGrep,
     fsGrep,
     globWalk,
