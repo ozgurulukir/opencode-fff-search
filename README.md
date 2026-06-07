@@ -180,6 +180,12 @@ fff supports basic regex: character classes (`[abc]`), quantifiers (`+`, `*`, `?
 
 fff's grep indexes symbol tokens (identifiers, component names) but not language keywords (`import`, `const`, `return`, `export`). The plugin cannot override this for ASCII patterns. For keyword search, use bash `grep`/`rg` directly.
 
+#### Workspace-Outside Path Limitation
+
+Both `grep` and `glob` tools only search within the current workspace directory. When `path` points to a directory outside the workspace, the tools throw an error: `Path is outside the workspace directory`. This is by design — fff's index is scoped to a single workspace root. Searching across multiple workspaces or arbitrary system directories is not supported.
+
+**Workaround**: For searching outside the workspace, use bash `grep`/`rg` directly.
+
 #### Grep Recall Gap (Mitigated)
 
 fff's grep engine does not guarantee 100% recall across all files — coverage is high for symbol names and identifiers but inconsistent for short/common words.

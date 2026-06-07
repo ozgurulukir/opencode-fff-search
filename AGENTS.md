@@ -690,6 +690,14 @@ export — `__test` — and calling it has no side effect.
 20. **Upstream (OpenCode/Bun) plugin loading bug — `"paths[1]" must be of type string, got object`**: When `package.json` in the plugin directory (e.g. `~/.config/opencode/`) lacks `"type": "module"`, Bun's internal CJS `require()` implementation throws `The "paths[1]" property must be of type string, got object` during dependency resolution. This is a Bun runtime bug — OpenCode's plugin loader (`packages/opencode/src/plugin/loader.ts`) calls `import(row.entry)` with no second argument and no `paths` option. The error originates from Bun's bundled `require.resolve` wrapper which receives an invalid `options.paths` array internally when the module type is ambiguous. **Root cause on Windows**: `@ff-labs/fff-node` depends on `ffi-rs` which uses CJS `require()` to load native `.node` addons — this triggers the Bun `paths[1]` bug on Windows. **Solution**: the plugin now detects Bun at runtime (`typeof Bun !== "undefined"`) and imports `@ff-labs/fff-bun` instead, which uses `bun:ffi` (`dlopen`) and has zero CJS dependencies. Under Node.js (tests), `@ff-labs/fff-node` is used.
 21. **Named exports trigger `getLegacyPlugins()` server calls**: OpenCode's `getLegacyPlugins(mod)` iterates `Object.values(mod)` and invokes each function-valued export as a separate plugin `server()`. Under Bun-on-Windows, calling an internal function like `fsGrep` or `loadGitignoreFilter` with `(PluginInput, options)` arguments triggers a `paths[1]` CJS interop crash inside Bun's `require.resolve`. **Fix**: Always wrap test-only internal exports under a single `export async function __test()` rather than individual named `export { ... }` blocks.
 
+## Future Investigation: Cross-Workspace Search
+
+Both tools currently reject `path` arguments outside the workspace directory with an error. fff's index is workspace-scoped and `fsGrep`/`globWalk` fallbacks also enforce the boundary. Potential improvements:
+
+- Allow outside-workspace paths by skipping fff and routing directly to `fsGrep`/`globWalk`
+- Multi-root workspace support (multiple fff indices)
+- User-configurable search scope (whitelist of additional directories)
+
 ## Dependencies
 
 ### Runtime
