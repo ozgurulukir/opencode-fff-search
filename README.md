@@ -53,7 +53,7 @@ Restart OpenCode — the plugin is re-fetched from npm on next startup.
 ```bash
 mkdir -p ~/.config/opencode/plugins
 cp index.js ~/.config/opencode/plugins/opencode-fff-search.js
-cd ~/.config/opencode && npm install
+cd ~/.config/opencode && npm install @ff-labs/fff-node @ff-labs/fff-bun minimatch
 ```
 
 ### Option 3: Install script (Linux/macOS)

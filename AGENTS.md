@@ -161,11 +161,11 @@ opencode debug config --print-logs 2>&1 | grep fff
 ```bash
 # For development testing (global OpenCode config)
 ln -sf $(pwd)/index.js ~/.config/opencode/plugins/opencode-fff-search.js
-cd ~/.config/opencode && npm install
+cd ~/.config/opencode && npm install @ff-labs/fff-node @ff-labs/fff-bun minimatch
 
 # For project-local testing
 mkdir -p .opencode/plugins && cp index.js .opencode/plugins/
-cd .opencode && npm install
+cd .opencode && npm install @ff-labs/fff-node @ff-labs/fff-bun minimatch
 
 # Using the install script (Linux/macOS only)
 ./install.sh

@@ -39,10 +39,10 @@ cd "$CONFIG_DIR" || exit 1
 
 if command -v bun &> /dev/null; then
     echo "Using Bun to install dependencies..."
-    bun add @ff-labs/fff-node
+    bun add @ff-labs/fff-node @ff-labs/fff-bun minimatch
 elif command -v npm &> /dev/null; then
     echo "Using npm to install dependencies..."
-    npm install @ff-labs/fff-node
+    npm install @ff-labs/fff-node @ff-labs/fff-bun minimatch
 else
     echo "Error: Neither Bun nor npm found. Please install Node.js (https://nodejs.org) or Bun (https://bun.sh)."
     exit 1
