@@ -114,7 +114,6 @@ Four search paths, selected automatically:
 | ----------------------------------- | ---------------------------------------------------- | ------ |
 | `path` points to a file             | `directFileGrep` — Node.js async file read           | 100%   |
 | Non-ASCII pattern (Turkish/Unicode) | `fsGrep` — directory walk + Unicode regex (`u` flag) | 100%   |
-| `path` outside indexed workspace    | `fsGrep` — filesystem-level grep                     | 100%   |
 | ASCII pattern in indexed dir        | fff indexed search (regex/plain + smart case)        | ~90%+  |
 
 **fff fallback chain**: If fff returns zero results, the plugin retries with regex mode (if plain failed), then falls back to `fsGrep` for guaranteed coverage.

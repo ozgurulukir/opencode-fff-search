@@ -36,7 +36,6 @@ The plugin exports an async default function `(input)` that:
 grep:
   File path      → directFileGrep (Node.js fsPromises.readFile) → format
   Unicode pattern → fsGrep (fsPromises.readdir + fsPromises.readFile + Unicode regex) → post-filter → format
-  Outside index  → fsGrep (path outside basePath) → format
   ASCII pattern  → fff grep (plain or regex mode) → if zero → plain→regex retry → fsGrep fallback → post-filter → format
 
 glob:
@@ -600,15 +599,16 @@ This bug appeared in **two separate PRs** (#1 and #3), both in the `fsGrep` fall
 
 `fsGrep` walks directories with `fsPromises.readdir` and reads files with `fsPromises.readFile`. For a common short pattern (e.g. `fn`, `pub`, `use`) the bigram content index in fff returns zero results, the `fsGrep` failsafe fires, and it can take a long time scanning every file in a directory.
 
-**Fix**: `fsGrep` now accepts an optional `limit` parameter and returns early when `results.length >= limit`. All three call sites (Unicode fallback, outside-index fallback, failsafe fallback) pass `limit` through. When calling `fsGrep`, always pass the caller's `limit` so the early-return guard works correctly.
+**Fix**: `fsGrep` now accepts an optional `limit` parameter and returns early when `results.length >= limit`. The two reachable call sites (Unicode fallback and failsafe fallback) pass `limit` through. When calling `fsGrep`, always pass the caller's `limit` so the early-return guard works correctly. (The "outside-index" fallback is not reachable — `resolvePath()` rejects outside-workspace paths before `fsGrep` can be called.)
 
 ### The `fsGrep` failsafe is the last-resort fallback — not first choice
 
 `fsGrep` is intentionally slow (directory-level async I/O). It should only be reached through:
 
 - Unicode/Non-ASCII patterns (`/[^\x00-\x7F]/`) — forced `fsGrep` route
-- Outside-index paths — `args.path` outside the indexed directory
 - Zero-result failsafe — fff returned nothing, recurse to `fsGrep`
+
+Note: `resolvePath()` rejects paths outside the workspace before `fsGrep` can be called. The "outside-index" fallback is not reachable — attempts to search outside the workspace throw `Path is outside the workspace directory`.
 
 For ASCII patterns where fff returns results, `fsGrep` is never called. The exception is PR #3's fix where the failsafe `fallbackDir` was computed with `join()` instead of `resolvePath()`, causing it to silently find nothing.
 
