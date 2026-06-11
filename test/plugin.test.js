@@ -1225,6 +1225,11 @@ describe("FffPlugin", () => {
         ".env file should not be ignored (only directories starting with .)",
       );
     });
+    it("should not throw and return baseline skip filter when .gitignore is missing", async () => {
+      const filter = await loadGitignoreFilter(tmpDir);
+      assert.strictEqual(filter("node_modules", true), true);
+      assert.strictEqual(filter("src", true), false);
+    });
   });
 
   describe("globWalk internals", () => {
