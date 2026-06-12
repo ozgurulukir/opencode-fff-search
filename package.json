@@ -1,6 +1,6 @@
 {
   "name": "opencode-fff-search",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Plugin that replaces default grep/glob with fff's ultra-fast search (OpenCode + MiMo Code)",
   "type": "module",
   "main": "index.js",
