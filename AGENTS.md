@@ -4,11 +4,11 @@ This document provides essential context for AI agents working on the opencode-f
 
 ## Project Overview
 
-OpenCode plugin that replaces OpenCode's built-in `grep` and `glob` file search tools with [fff](https://github.com/dmtrKovalenko/fff)'s ultra-fast, typo-resistant search engine.
+Plugin that replaces the built-in `grep` and `glob` file search tools with [fff](https://github.com/dmtrKovalenko/fff)'s ultra-fast, typo-resistant search engine. Supports both OpenCode and MiMo Code.
 
 **Key characteristics:**
 
-- Single-file ES module plugin (`index.js`)
+- Modular ES module plugin (6 files: `index.js`, `search.js`, `helpers.js`, `filters.js`, `gitignore.js`, `constants.js`)
 - No build step required
 - Node.js 18+ required (ES modules)
 - Uses `@ff-labs/fff-node` (Node.js) or `@ff-labs/fff-bun` (Bun runtime) with auto-detection, plus `minimatch` for glob matching
@@ -17,18 +17,20 @@ OpenCode plugin that replaces OpenCode's built-in `grep` and `glob` file search 
 - **Single-file 100% recall** — When path points to a file, reads it directly bypassing fff index
 - **aiMode enabled** — Frecency scoring on by default for better recall and ranking
 - **Smart mode detection** — Detects regex vs plain patterns; plain uses SIMD-accelerated literal matching
+- **Dual platform** — Supports both OpenCode (`@opencode-ai/plugin`) and MiMo Code (`@mimo-ai/plugin`) with runtime auto-detection
 
 ## Architecture
 
 ### Plugin Structure
 
-The plugin exports an async default function `(input)` that:
+The plugin exports an async default function `(input)` (also exported as `server` for MiMo Code compatibility) that:
 
 1. **Lazily imports** fff-native (`@ff-labs/fff-bun` or `@ff-labs/fff-node` via `lazyFff()`) at runtime — never at module level, avoiding Bun-on-Windows module-graph crashes
-2. **Initializes** a `FileFinder` instance with safe defaults; gracefully falls back to fs-only mode when `FileFinder.create()` returns `ok: false`
-3. **Caches** one `FileFinder` per directory (module-level `instances` Map) to prevent native resource leaks
-4. **Creates a shared `scanPromise`** to avoid multiple concurrent index scans
-5. **Returns tool definitions** that override OpenCode's built-in `grep` and `glob` tools
+2. **Auto-detects** plugin SDK (`@mimo-ai/plugin` or `@opencode-ai/plugin`) at runtime
+3. **Initializes** a `FileFinder` instance with safe defaults; gracefully falls back to fs-only mode when `FileFinder.create()` returns `ok: false`
+4. **Caches** one `FileFinder` per directory (module-level `instances` Map) to prevent native resource leaks
+5. **Creates a shared `scanPromise`** to avoid multiple concurrent index scans
+6. **Returns tool definitions** that override OpenCode's built-in `grep` and `glob` tools
 
 ### Data Flow
 
@@ -158,6 +160,10 @@ opencode debug config --print-logs 2>&1 | grep fff
 ### Installation
 
 ```bash
+# Using the install script (Linux/macOS only)
+./install.sh --target opencode    # OpenCode
+./install.sh --target mimocode    # MiMo Code
+
 # For development testing (global OpenCode config)
 ln -sf $(pwd)/index.js ~/.config/opencode/plugins/opencode-fff-search.js
 cd ~/.config/opencode && npm install @ff-labs/fff-node @ff-labs/fff-bun minimatch
@@ -165,9 +171,6 @@ cd ~/.config/opencode && npm install @ff-labs/fff-node @ff-labs/fff-bun minimatc
 # For project-local testing
 mkdir -p .opencode/plugins && cp index.js .opencode/plugins/
 cd .opencode && npm install @ff-labs/fff-node @ff-labs/fff-bun minimatch
-
-# Using the install script (Linux/macOS only)
-./install.sh
 ```
 
 ### Publishing
@@ -526,14 +529,15 @@ Automated test suite using `node:test` (zero external dependencies, Node.js 18+)
 node --test 'test/*.test.js'
 ```
 
-172 tests across 44 suites split across three files:
+183 tests across 46 suites split across three files:
 
 - **`test/plugin.test.js`** — Plugin integration tests (initialization, tool shape, grep/glob
   execute, case sensitivity, path filtering, exclude/include, Turkish/Unicode, context lines,
   limit, abort, regex mode, pagination, edge cases, fsGrep/globWalk/directFileGrep internals)
 - **`test/internals.test.js`** — Pure unit tests for internal functions (detectGrepMode,
-  filterByPath, resolvePath, parsePatterns, shouldIncludeFile, applyMinimatchFilter, safeLog,
-  waitForScan, searchInFile, fetchGrepPages, lazyFff, performGrepRouting)
+  filterByPath, resolvePath, getRelativePath, isPathInsideIndex, parsePatterns, shouldIncludeFile,
+  applyMinimatchFilter, safeLog, waitForScan, searchInFile, fetchGrepPages, lazyFff,
+  performGrepRouting)
 - **`test/stress.test.js`** — SIGBUS stability stress tests (file mutation, multiple native
   instances, large files, plugin-level stress)
 
@@ -570,7 +574,7 @@ node --test test/stress-mmap-enabled.js   # WARNING: will SIGBUS
 node --test test/stress-mmap-single.js    # WARNING: will SIGBUS on real repo
 ```
 
-See [SIGBUS_INVESTIGATION.md](./SIGBUS_INVESTIGATION.md).
+See [SIGBUS_INVESTIGATION.md](./docs/SIGBUS_INVESTIGATION.md).
 
 ## Lessons Learned
 
@@ -674,7 +678,7 @@ export — `__test` — and calling it has no side effect.
 4. **Configurable limits**: Default 100 results for both tools, configurable up to 5000 via `limit` param.
 5. **Abort checking**: Check `context.abort.aborted` both at start AND after any async operation.
 6. **minimatch import**: Must use named import: `import { minimatch } from "minimatch"`.
-7. **peerDependency**: `@opencode-ai/plugin` is a peer dependency — users install it, not the plugin itself.
+7. **peerDependency**: `@opencode-ai/plugin` and `@mimo-ai/plugin` are optional peer dependencies — the plugin auto-detects which SDK is available at runtime.
 8. **Smart case**: Uppercase/mixed-case patterns search case-sensitively. Use lowercase for broad matching. Override with `caseSensitive` param.
 9. **Recall gap**: fff's grep may miss matches in directories. Single-file searches have 100% recall. For directory-wide 100% recall, fall back to bash `grep`.
 10. **Single-file search**: When `path` points to a file, the plugin reads it directly with Node.js — bypasses fff entirely.
@@ -711,11 +715,18 @@ The plugin auto-detects the runtime at load time using `typeof Bun !== "undefine
 ### Peer Dependencies
 
 - `@opencode-ai/plugin` ^1.14.28 - OpenCode plugin SDK
+- `@mimo-ai/plugin` ^0.1.0-preview.0 - MiMo Code plugin SDK
 
 ```
 opencode-fff-search/
-├── index.js          # Single plugin file (ES module)
+├── index.js          # Plugin entry, tool definitions, lazy init (ES module)
+├── search.js         # Grep/glob search logic (fsGrep, globWalk, fetchGrepPages, etc.)
+├── helpers.js        # Path utils, safeLog, waitForScan
+├── filters.js        # minimatch filtering, parsePatterns, filterByPath
+├── gitignore.js      # .gitignore reader + cache
+├── constants.js      # Constants, regexes, SKIP_DIRS
 ├── package.json      # NPM package configuration
+├── install.sh        # Installation script (OpenCode + MiMo Code)
 ├── test/
 │   ├── helpers.mjs                     # Shared test utilities (createTempProject, createMockClient, etc.)
 │   ├── plugin.test.js                  # Plugin integration tests (initialization, grep/glob execute)
@@ -743,13 +754,15 @@ opencode-fff-search/
 │   ├── mutation-worker.cjs            # CJS worker for synthetic mutations
 │   └── mutation-worker-real.cjs       # CJS worker for real repo mutations
 ├── install.sh        # Installation script (Linux/macOS only)
-├── SIGBUS_INVESTIGATION.md  # SIGBUS root cause analysis
-├── PUBLISHING.md     # Publishing instructions
+├── docs/
+│   ├── SIGBUS_INVESTIGATION.md  # SIGBUS root cause analysis
+│   ├── CRASH_REPORT_v0.6.4.md   # fff-node v0.6.4 crash report
+│   └── PUBLISHING.md            # Publishing instructions
 ├── LICENSE           # MIT License
 └── AGENTS.md         # This file
 ```
 
-Only `index.js` is included in the published npm package (see `package.json` `files` array).
+All plugin `.js` files are included in the published npm package (see `package.json` `files` array).
 
 ## Making Changes
 

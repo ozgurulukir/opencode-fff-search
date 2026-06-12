@@ -8,3 +8,4 @@ test/.tmp-*
 bun.lock
 local/
 .crush/
+.mimocode/

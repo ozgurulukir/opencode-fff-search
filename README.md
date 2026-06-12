@@ -1,6 +1,6 @@
 # opencode-fff-search
 
-OpenCode plugin that replaces the default `grep` and `glob` file search tools with [fff](https://github.com/dmtrKovalenko/fff)'s ultra-fast, typo-resistant search engine.
+Plugin that replaces the default `grep` and `glob` file search tools with [fff](https://github.com/dmtrKovalenko/fff)'s ultra-fast, typo-resistant search engine. Supports both **OpenCode** and **MiMo Code**.
 
 ## Features
 
@@ -22,7 +22,7 @@ OpenCode plugin that replaces the default `grep` and `glob` file search tools wi
 
 ## Prerequisites
 
-- OpenCode 1.14+
+- OpenCode 1.14+ or MiMo Code 0.1+
 - Node.js 18+ (or Bun)
 - **Cross-platform:** Linux, macOS, Windows (WSL recommended for Windows)
 
@@ -62,7 +62,13 @@ cd ~/.config/opencode && npm install @ff-labs/fff-node @ff-labs/fff-bun minimatc
 git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search && npm install
 
-# Run the test suite (172 tests)
+# Install for OpenCode
+./install.sh --target opencode
+
+# Install for MiMo Code
+./install.sh --target mimocode
+
+# Run the test suite (183 tests)
 node --test 'test/*.test.js'
 
 # Run session simulation tests
@@ -76,17 +82,27 @@ node -e "import('./index.js').then(m => console.log('OK'))"
 
 ```
 opencode-fff-search/
-├── index.js          # Single plugin file (ES module)
-├── package.json      # NPM package configuration
+├── index.js              # Plugin entry, tool definitions, lazy init
+├── search.js             # Grep/glob search logic (fsGrep, globWalk, etc.)
+├── helpers.js            # Path utils, safeLog, waitForScan
+├── filters.js            # minimatch filtering, parsePatterns
+├── gitignore.js          # .gitignore reader + cache
+├── constants.js          # Constants, regexes, SKIP_DIRS
+├── package.json
+├── install.sh            # Install script (OpenCode + MiMo Code)
 ├── test/
 │   ├── helpers.mjs                     # Shared test utilities
 │   ├── plugin.test.js                  # Plugin integration tests
 │   ├── internals.test.js               # Internal function unit tests
 │   ├── stress.test.js                  # SIGBUS stability stress tests
 │   └── ...                             # Session, integration tests
-├── AGENTS.md         # Agent context documentation
-├── README.md         # This file
-└── LICENSE           # MIT License
+├── docs/
+│   ├── SIGBUS_INVESTIGATION.md         # SIGBUS root cause analysis
+│   ├── CRASH_REPORT_v0.6.4.md          # fff-node v0.6.4 crash report
+│   └── PUBLISHING.md                   # Publishing instructions
+├── AGENTS.md             # Agent context documentation
+├── README.md             # This file
+└── LICENSE               # MIT License
 ```
 
 ## Configuration
@@ -306,7 +322,7 @@ fff's grep may not find matches in all files when searching directories. For 100
 git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search && npm install
 
-# Run the test suite (172 tests)
+# Run the test suite (183 tests)
 node --test 'test/*.test.js'
 
 # Run session simulation tests

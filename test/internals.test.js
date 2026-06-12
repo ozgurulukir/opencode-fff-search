@@ -13,6 +13,8 @@ const {
   detectGrepMode,
   filterByPath,
   resolvePath,
+  getRelativePath,
+  isPathInsideIndex,
   parsePatterns,
   shouldIncludeFile,
   applyMinimatchFilter,
@@ -116,6 +118,88 @@ describe("resolvePath", () => {
 
     assert.strictEqual(resolvePath(workspace, ""), path.resolve(workspace));
     assert.strictEqual(resolvePath(workspace, null), path.resolve(workspace));
+  });
+});
+
+describe("getRelativePath", () => {
+  it("should return null for falsy argsPath", () => {
+    assert.strictEqual(getRelativePath("/var/workspace", null), null);
+    assert.strictEqual(getRelativePath("/var/workspace", ""), null);
+    assert.strictEqual(getRelativePath("/var/workspace", undefined), null);
+  });
+
+  it("should return argsPath as-is when it is already relative", () => {
+    assert.strictEqual(
+      getRelativePath("/var/workspace", "src/index.js"),
+      "src/index.js",
+    );
+    assert.strictEqual(
+      getRelativePath("/var/workspace", "./src/index.js"),
+      "./src/index.js",
+    );
+  });
+
+  it("should convert absolute path to relative", () => {
+    assert.strictEqual(
+      getRelativePath("/var/workspace", "/var/workspace/src/index.js"),
+      "src/index.js",
+    );
+    assert.strictEqual(
+      getRelativePath("/var/workspace", "/var/workspace/"),
+      "",
+    );
+  });
+
+  it("should produce relative paths even for outside-workspace absolutes", () => {
+    assert.strictEqual(
+      getRelativePath("/var/workspace", "/etc/passwd"),
+      "../../etc/passwd",
+    );
+  });
+});
+
+describe("isPathInsideIndex", () => {
+  it("should return true for falsy argsPath", () => {
+    assert.strictEqual(isPathInsideIndex(null, "/var/workspace"), true);
+    assert.strictEqual(isPathInsideIndex("", "/var/workspace"), true);
+    assert.strictEqual(isPathInsideIndex(undefined, "/var/workspace"), true);
+  });
+
+  it("should return true for relative paths", () => {
+    assert.strictEqual(isPathInsideIndex("src/index.js", "/var/workspace"), true);
+    assert.strictEqual(isPathInsideIndex("../etc/passwd", "/var/workspace"), true);
+  });
+
+  it("should return true when absolute path is inside directory", () => {
+    assert.strictEqual(
+      isPathInsideIndex("/var/workspace/src/index.js", "/var/workspace"),
+      true,
+    );
+  });
+
+  it("should return true when absolute path equals directory", () => {
+    assert.strictEqual(
+      isPathInsideIndex("/var/workspace", "/var/workspace"),
+      true,
+    );
+  });
+
+  it("should return false when absolute path is outside directory", () => {
+    assert.strictEqual(
+      isPathInsideIndex("/etc/passwd", "/var/workspace"),
+      false,
+    );
+    assert.strictEqual(
+      isPathInsideIndex("/var/workspace-other", "/var/workspace"),
+      false,
+    );
+  });
+
+  it("should not match partial directory name prefix", () => {
+    assert.strictEqual(
+      isPathInsideIndex("/var/workspacex/file", "/var/workspace"),
+      false,
+    );
   });
 });
 
