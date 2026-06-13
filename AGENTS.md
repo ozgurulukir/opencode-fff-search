@@ -160,11 +160,15 @@ opencode debug config --print-logs 2>&1 | grep fff
 ### Installation
 
 ```bash
-# Using the install script (Linux/macOS only)
+# Using the install script (Linux/macOS only) — idempotent
 ./install.sh --target opencode    # OpenCode
 ./install.sh --target mimocode    # MiMo Code
 
-# For development testing (global OpenCode config)
+# The install.sh copies files to plugins/opencode-fff-search/ and creates a
+# symlink opencode-fff-search.js → opencode-fff-search/index.js for auto-discovery.
+# Remove "opencode-fff-search" from your config's "plugin" array before running.
+
+# For live development (fast iteration):
 ln -sf $(pwd)/index.js ~/.config/opencode/plugins/opencode-fff-search.js
 cd ~/.config/opencode && npm install @ff-labs/fff-node @ff-labs/fff-bun minimatch
 
@@ -670,6 +674,34 @@ with a single `export async function __test() {}` that returns an object contain
 all internal functions. This way `getLegacyPlugins()` sees exactly one function
 export — `__test` — and calling it has no side effect.
 
+### OpenCode auto-discovery glob does not match subdirectories
+
+OpenCode's `ConfigPlugin.load(dir)` uses the glob pattern `{plugin,plugins}/*.{ts,js}`
+to auto-discover local plugins. This only matches **files directly inside** the
+`plugins/` directory — `plugins/my-plugin.js` works, but
+`plugins/my-plugin/index.js` does **not**.
+
+This means placing plugin files in a subdirectory (`plugins/opencode-fff-search/`)
+does NOT enable auto-discovery. The correct approach is to create a **symlink**
+directly in `plugins/`:
+
+```bash
+ln -sf opencode-fff-search/index.js plugins/opencode-fff-search.js
+```
+
+The glob `{plugin,plugins}/*.{ts,js}` finds the symlink (with `symlink: true`),
+Node.js `import()` follows the symlink to the real path, and `import.meta.url`
+resolves to the real directory — so relative imports (`./constants.js`) and
+npm package resolution both work correctly.
+
+**`install.sh` behaves correctly**: it copies files into `plugins/opencode-fff-search/`
+then creates the symlink `plugins/opencode-fff-search.js` → `opencode-fff-search/index.js`.
+
+**Config caveat**: If the `"plugin"` array also contains the npm spec
+`"opencode-fff-search"`, the deduplication key is different (`file://...` URL vs
+package name `opencode-fff-search`), so **both** survive dedup and the plugin
+loads twice. The npm spec must be removed when using the symlink approach.
+
 ## Common Gotchas
 
 1. **Return format**: Must return `{ output, metadata }` objects, not plain strings. TUI reads metadata for match counts.
@@ -693,6 +725,7 @@ export — `__test` — and calling it has no side effect.
 19. **Test directory deletion can trigger a Rust panic**: `createTempProject()` internally calls `cleanupTempProject(tmpDir)` which deletes the shared test directory. If another test's `before()` hook then tries to rebuild that directory while the Rust overlay's `base_file_count()` is stale (higher than `files.len()`), calling `finder.grep()` inside `fetchGrepPages` will reach `files[overflow_start..]` with `overflow_start > files.len()` — a process-fatal slice panic (`grep.rs:2110`) that cannot be caught in JS. Workaround: never delete `tmpDir` from within a test. Use an isolated directory (e.g. `rmSync` a fresh unique path) so the shared test directory is untouched. The JS-side guards (`existsSync(fallbackDir)` in `fsGrep` failsafe, `totalFilesSearched === 0` retry in `fetchGrepPages`) reduce the blast radius but cannot prevent this specific panic.
 20. **Upstream (OpenCode/Bun) plugin loading bug — `"paths[1]" must be of type string, got object`**: When `package.json` in the plugin directory (e.g. `~/.config/opencode/`) lacks `"type": "module"`, Bun's internal CJS `require()` implementation throws `The "paths[1]" property must be of type string, got object` during dependency resolution. This is a Bun runtime bug — OpenCode's plugin loader (`packages/opencode/src/plugin/loader.ts`) calls `import(row.entry)` with no second argument and no `paths` option. The error originates from Bun's bundled `require.resolve` wrapper which receives an invalid `options.paths` array internally when the module type is ambiguous. **Root cause on Windows**: `@ff-labs/fff-node` depends on `ffi-rs` which uses CJS `require()` to load native `.node` addons — this triggers the Bun `paths[1]` bug on Windows. **Solution**: the plugin now detects Bun at runtime (`typeof Bun !== "undefined"`) and imports `@ff-labs/fff-bun` instead, which uses `bun:ffi` (`dlopen`) and has zero CJS dependencies. Under Node.js (tests), `@ff-labs/fff-node` is used.
 21. **Named exports trigger `getLegacyPlugins()` server calls**: OpenCode's `getLegacyPlugins(mod)` iterates `Object.values(mod)` and invokes each function-valued export as a separate plugin `server()`. Under Bun-on-Windows, calling an internal function like `fsGrep` or `loadGitignoreFilter` with `(PluginInput, options)` arguments triggers a `paths[1]` CJS interop crash inside Bun's `require.resolve`. **Fix**: Always wrap test-only internal exports under a single `export async function __test()` rather than individual named `export { ... }` blocks.
+22. **Auto-discovery glob does not match subdirectories**: OpenCode's auto-discovery uses `{plugin,plugins}/*.{ts,js}` — only direct files in the `plugins/` directory. `plugins/subdir/index.js` is never discovered. Always create a symlink directly in `plugins/`: `ln -sf subdir/index.js plugins/my-plugin.js`. If both a symlink file spec and an npm package spec with the same name exist, dedup preserves both (different keys) and the plugin loads twice.
 
 ## Future Investigation: Cross-Workspace Search
 

@@ -63,19 +63,10 @@ install_opencode() {
 
   echo "  Plugin files copied to $INSTALL_DIR"
 
-  echo "Installing dependencies in $CONFIG_DIR..."
-  cd "$CONFIG_DIR" || exit 1
+  ln -sf "opencode-fff-search/index.js" "$PLUGINS_DIR/opencode-fff-search.js"
+  echo "  Symlink created: $PLUGINS_DIR/opencode-fff-search.js → opencode-fff-search/index.js"
 
-  if command -v bun &> /dev/null; then
-    echo "  Using Bun..."
-    bun add @ff-labs/fff-node @ff-labs/fff-bun minimatch @opencode-ai/plugin
-  elif command -v npm &> /dev/null; then
-    echo "  Using npm..."
-    npm install @ff-labs/fff-node @ff-labs/fff-bun minimatch @opencode-ai/plugin
-  else
-    echo "Error: Neither Bun nor npm found."
-    exit 1
-  fi
+  install_deps "$CONFIG_DIR" @ff-labs/fff-node @ff-labs/fff-bun minimatch @opencode-ai/plugin
 
   echo ""
   echo "Done! Restart OpenCode and verify:"
@@ -96,23 +87,47 @@ install_mimocode() {
 
   echo "  Plugin files copied to $INSTALL_DIR"
 
-  echo "Installing dependencies in $CONFIG_DIR..."
-  cd "$CONFIG_DIR" || exit 1
+  ln -sf "opencode-fff-search/index.js" "$CONFIG_DIR/plugins/opencode-fff-search.js"
+  echo "  Symlink created: $CONFIG_DIR/plugins/opencode-fff-search.js → opencode-fff-search/index.js"
 
-  if command -v bun &> /dev/null; then
-    echo "  Using Bun..."
-    bun add @ff-labs/fff-node @ff-labs/fff-bun minimatch @mimo-ai/plugin
-  elif command -v npm &> /dev/null; then
-    echo "  Using npm..."
-    npm install @ff-labs/fff-node @ff-labs/fff-bun minimatch @mimo-ai/plugin
-  else
-    echo "Error: Neither Bun nor npm found."
-    exit 1
-  fi
+  install_deps "$CONFIG_DIR" @ff-labs/fff-node @ff-labs/fff-bun minimatch @mimo-ai/plugin
 
   echo ""
   echo "Done! Restart MiMo Code and verify:"
   echo "  mimo run 'Search for test using grep'"
+}
+
+install_deps() {
+  local config_dir="$1"
+  shift
+  local pkgs=("$@")
+
+  cd "$config_dir" || exit 1
+
+  local all_installed=true
+  for pkg in "${pkgs[@]}"; do
+    if [ ! -d "node_modules/$pkg" ]; then
+      all_installed=false
+      break
+    fi
+  done
+
+  if [ "$all_installed" = true ]; then
+    echo "  Dependencies already installed, skipped."
+    return
+  fi
+
+  echo "Installing dependencies in $config_dir..."
+  if command -v bun &> /dev/null; then
+    echo "  Using Bun..."
+    bun add "${pkgs[@]}"
+  elif command -v npm &> /dev/null; then
+    echo "  Using npm..."
+    npm install "${pkgs[@]}"
+  else
+    echo "Error: Neither Bun nor npm found."
+    exit 1
+  fi
 }
 
 case "$TARGET" in

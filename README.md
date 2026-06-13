@@ -28,9 +28,24 @@ Plugin that replaces the default `grep` and `glob` file search tools with [fff](
 
 ## Installation
 
-### Option 1: From npm (recommended)
+### Option 1: Install script — auto-discovery (recommended)
 
-Add to your `opencode.json` or `opencode.jsonc`:
+```bash
+git clone https://github.com/ozgurulukir/opencode-fff-search.git
+cd opencode-fff-search && npm install
+
+# Install for OpenCode
+./install.sh --target opencode
+
+# Install for MiMo Code
+./install.sh --target mimocode
+```
+
+The script copies plugin files to `~/.config/opencode/plugins/opencode-fff-search/` and creates a **symlink** `opencode-fff-search.js` → `opencode-fff-search/index.js` in the same directory. OpenCode's auto-discovery glob `{plugin,plugins}/*.{ts,js}` finds the symlink and loads the plugin. The script is **idempotent** — re-running skips dependency installation if already present.
+
+The `"plugin"` array in your config must NOT contain `"opencode-fff-search"` (remove it) — the symlink-based auto-discovery replaces the npm-package approach.
+
+### Option 2: From npm (alternative)
 
 ```jsonc
 {
@@ -38,25 +53,13 @@ Add to your `opencode.json` or `opencode.jsonc`:
 }
 ```
 
-OpenCode auto-installs the plugin and its dependencies on startup.
-
-After upgrading the package version in `opencode.json`, delete the cached copy to force re-install:
+OpenCode auto-installs the plugin and its dependencies on startup. After upgrading the version, delete the cached copy to force re-install:
 
 ```bash
 rm -rf ~/.cache/opencode/packages/opencode-fff-search@latest/
 ```
 
-Restart OpenCode — the plugin is re-fetched from npm on next startup.
-
-### Option 2: Manual installation
-
-```bash
-mkdir -p ~/.config/opencode/plugins
-cp index.js ~/.config/opencode/plugins/opencode-fff-search.js
-cd ~/.config/opencode && npm install @ff-labs/fff-node @ff-labs/fff-bun minimatch
-```
-
-### Option 3: Install script (Linux/macOS)
+### Option 3: Manual installation
 
 ```bash
 git clone https://github.com/ozgurulukir/opencode-fff-search.git
@@ -280,11 +283,17 @@ On a 48K-file repo (nodejs/node):
 
 ### Plugin not loading
 
-- Ensure plugin file is in correct `plugins/` directory
+- Check that the config `"plugin"` array does NOT contain `"opencode-fff-search"` (npm spec). The install.sh creates a symlink for auto-discovery; having both causes duplicate loading.
+- Verify the symlink exists: `ls -la ~/.config/opencode/plugins/opencode-fff-search.js` (should point to `opencode-fff-search/index.js`)
 - Verify dependencies: `ls ~/.config/opencode/node_modules/@ff-labs/fff-node`
-- For development, symlink for live updates: `ln -sf $(pwd)/index.js ~/.config/opencode/plugins/opencode-fff-search.js`
+- For live development, symlink directly to your working copy:
+  ```bash
+  ln -sf /path/to/your/index.js ~/.config/opencode/plugins/opencode-fff-search.js
+  ```
 
-### Plugin not updating after upgrade
+### Plugin not updating after change
+
+If installed via the install script, the symlink points to the plugin directory. After pulling new code, re-run `./install.sh --target opencode` (it's idempotent — skips deps if already installed).
 
 If installed via `opencode.json` (`"plugin": ["opencode-fff-search"]`), delete the cached copy to force re-install:
 
