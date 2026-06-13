@@ -43,25 +43,27 @@ install_opencode() {
   echo "Installing opencode-fff-search for OpenCode..."
 
   if [ -n "$OPCODE_PLUGIN_DIR" ]; then
-    INSTALL_DIR="$OPCODE_PLUGIN_DIR"
+    PLUGINS_DIR="$OPCODE_PLUGIN_DIR"
   elif [ -n "$OPENCODE_CONFIG_DIR" ]; then
-    INSTALL_DIR="$OPENCODE_CONFIG_DIR/plugins"
+    PLUGINS_DIR="$OPENCODE_CONFIG_DIR/plugins"
   elif [ -d "$HOME/.config/opencode" ]; then
-    INSTALL_DIR="$HOME/.config/opencode/plugins"
+    PLUGINS_DIR="$HOME/.config/opencode/plugins"
   else
-    INSTALL_DIR="$HOME/.opencode/plugins"
+    PLUGINS_DIR="$HOME/.opencode/plugins"
   fi
+
+  CONFIG_DIR="$(dirname "$PLUGINS_DIR")"
+  INSTALL_DIR="$PLUGINS_DIR/opencode-fff-search"
 
   mkdir -p "$INSTALL_DIR"
 
   for f in "${PLUGIN_FILES[@]}"; do
-    cp "$SCRIPT_DIR/$f" "$INSTALL_DIR/$f"
+    cp -f "$SCRIPT_DIR/$f" "$INSTALL_DIR/$f"
   done
 
   echo "  Plugin files copied to $INSTALL_DIR"
 
-  echo "Installing dependencies..."
-  CONFIG_DIR="$INSTALL_DIR"
+  echo "Installing dependencies in $CONFIG_DIR..."
   cd "$CONFIG_DIR" || exit 1
 
   if command -v bun &> /dev/null; then
@@ -86,17 +88,16 @@ install_mimocode() {
   CONFIG_DIR="$HOME/.config/mimocode"
   INSTALL_DIR="$CONFIG_DIR/plugins/opencode-fff-search"
 
-  rm -rf "$INSTALL_DIR"
   mkdir -p "$INSTALL_DIR"
 
   for f in "${PLUGIN_FILES[@]}"; do
-    cp "$SCRIPT_DIR/$f" "$INSTALL_DIR/$f"
+    cp -f "$SCRIPT_DIR/$f" "$INSTALL_DIR/$f"
   done
 
   echo "  Plugin files copied to $INSTALL_DIR"
 
-  echo "Installing dependencies..."
-  cd "$INSTALL_DIR" || exit 1
+  echo "Installing dependencies in $CONFIG_DIR..."
+  cd "$CONFIG_DIR" || exit 1
 
   if command -v bun &> /dev/null; then
     echo "  Using Bun..."
@@ -108,17 +109,6 @@ install_mimocode() {
     echo "Error: Neither Bun nor npm found."
     exit 1
   fi
-
-  echo ""
-  echo "  Writing config..."
-  mkdir -p "$CONFIG_DIR/.mimocode"
-  cat > "$CONFIG_DIR/mimocode.json" <<EOF
-{
-  "plugin": [
-    "$INSTALL_DIR"
-  ]
-}
-EOF
 
   echo ""
   echo "Done! Restart MiMo Code and verify:"
