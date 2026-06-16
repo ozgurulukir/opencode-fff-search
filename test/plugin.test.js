@@ -6,6 +6,7 @@ import {
   rmSync,
   existsSync,
   chmodSync,
+  promises as fsPromises,
 } from "node:fs";
 import path, { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1229,6 +1230,20 @@ describe("FffPlugin", () => {
       const filter = await loadGitignoreFilter(tmpDir);
       assert.strictEqual(filter("node_modules", true), true);
       assert.strictEqual(filter("src", true), false);
+    });
+
+    it("should not throw and return baseline skip filter when fsPromises.readFile throws", async () => {
+      const originalReadFile = fsPromises.readFile;
+      fsPromises.readFile = async () => {
+        throw new Error("Mocked error");
+      };
+      try {
+        const filter = await loadGitignoreFilter(join(tmpDir, "mock_error"));
+        assert.strictEqual(filter("node_modules", true), true);
+        assert.strictEqual(filter("src", true), false);
+      } finally {
+        fsPromises.readFile = originalReadFile;
+      }
     });
   });
 
