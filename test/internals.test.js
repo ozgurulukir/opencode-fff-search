@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync, renameSync } from "node:fs";
 import path from "node:path";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -870,6 +870,43 @@ describe("lazyFff", () => {
       },
     };
     await assert.doesNotReject(() => lazyFff(brokenClient));
+  });
+
+  it("should handle missing fff modules and log a warning", async () => {
+    const ffLabsDir = join(process.cwd(), "node_modules", "@ff-labs");
+    const ffLabsBackup = join(process.cwd(), "node_modules", "@ff-labs-backup");
+
+    // Rename before the import to trigger error
+    try {
+      renameSync(ffLabsDir, ffLabsBackup);
+    } catch(e) {}
+
+    let logged = false;
+    let loggedMsg = "";
+
+    try {
+      const mod = await import(`../index.js?bust=${Date.now()}`);
+      const internals = await mod.__test();
+
+      const client = {
+        app: {
+          log: async (msg) => {
+            if (msg.body && msg.body.message && msg.body.message.includes("fff-native import failed")) {
+              logged = true;
+              loggedMsg = msg.body.message;
+            }
+          }
+        }
+      };
+
+      await internals.lazyFff(client);
+    } finally {
+      try {
+        renameSync(ffLabsBackup, ffLabsDir);
+      } catch(e) {}
+    }
+
+    assert.strictEqual(logged, true, `Expected a warning to be logged, but got: ${loggedMsg}`);
   });
 
   it("should be idempotent (safe to call multiple times)", async () => {
