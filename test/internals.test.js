@@ -51,6 +51,21 @@ describe("detectGrepMode", () => {
     assert.strictEqual(detectGrepMode("a\\+"), "regex");
     assert.strictEqual(detectGrepMode("a\\*"), "regex");
     assert.strictEqual(detectGrepMode("a\\?"), "regex");
+    assert.strictEqual(detectGrepMode("\\d+"), "regex");
+    assert.strictEqual(detectGrepMode("\\w"), "regex");
+    assert.strictEqual(detectGrepMode("\\bword\\b"), "regex");
+    assert.strictEqual(detectGrepMode("\\D"), "regex");
+    assert.strictEqual(detectGrepMode("\\S"), "regex");
+    assert.strictEqual(detectGrepMode("\\W"), "regex");
+    assert.strictEqual(detectGrepMode("\\N"), "regex");
+    assert.strictEqual(detectGrepMode("\\B"), "regex");
+    assert.strictEqual(detectGrepMode("\\T"), "regex");
+    assert.strictEqual(detectGrepMode("[^a-z]"), "regex");
+    assert.strictEqual(detectGrepMode("[]"), "regex");
+    assert.strictEqual(detectGrepMode("[^]"), "regex");
+    assert.strictEqual(detectGrepMode("[^abc]"), "regex");
+    assert.strictEqual(detectGrepMode("\\|"), "regex");
+    assert.strictEqual(detectGrepMode("a.b"), "plain");
   });
 
   it("should handle null or undefined gracefully", () => {
