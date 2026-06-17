@@ -898,6 +898,35 @@ describe("lazyFff", () => {
     await lazyFff(null);
     await lazyFff(null);
   });
+
+  it("should log warning when fff-native import fails", async () => {
+    const mod = await import("../index.js?bust=" + Date.now());
+    const internals = await mod.__test();
+    globalThis.Bun = {};
+    let logged = false;
+    let loggedMsg = "";
+    const client = {
+      app: {
+        log: async (msg) => {
+          if (
+            msg.body &&
+            msg.body.message &&
+            msg.body.message.includes("fff-native import failed")
+          ) {
+            logged = true;
+            loggedMsg = msg.body.message;
+          }
+        },
+      },
+    };
+    try {
+      await internals.lazyFff(client);
+    } finally {
+      delete globalThis.Bun;
+    }
+    assert.strictEqual(logged, true);
+    assert.ok(loggedMsg.length > 0);
+  });
 });
 
 describe("performGrepRouting", () => {
