@@ -51,6 +51,21 @@ describe("detectGrepMode", () => {
     assert.strictEqual(detectGrepMode("a\\+"), "regex");
     assert.strictEqual(detectGrepMode("a\\*"), "regex");
     assert.strictEqual(detectGrepMode("a\\?"), "regex");
+    assert.strictEqual(detectGrepMode("\\d+"), "regex");
+    assert.strictEqual(detectGrepMode("\\w"), "regex");
+    assert.strictEqual(detectGrepMode("\\bword\\b"), "regex");
+    assert.strictEqual(detectGrepMode("\\D"), "regex");
+    assert.strictEqual(detectGrepMode("\\S"), "regex");
+    assert.strictEqual(detectGrepMode("\\W"), "regex");
+    assert.strictEqual(detectGrepMode("\\n"), "regex");
+    assert.strictEqual(detectGrepMode("\\B"), "regex");
+    assert.strictEqual(detectGrepMode("\\t"), "regex");
+    assert.strictEqual(detectGrepMode("[^a-z]"), "regex");
+    assert.strictEqual(detectGrepMode("[]"), "regex");
+    assert.strictEqual(detectGrepMode("[^]"), "regex");
+    assert.strictEqual(detectGrepMode("[^abc]"), "regex");
+    assert.strictEqual(detectGrepMode("\\|"), "regex");
+    assert.strictEqual(detectGrepMode("a.b"), "plain");
   });
 
   it("should handle null or undefined gracefully", () => {
@@ -166,8 +181,14 @@ describe("isPathInsideIndex", () => {
   });
 
   it("should return true for relative paths", () => {
-    assert.strictEqual(isPathInsideIndex("src/index.js", "/var/workspace"), true);
-    assert.strictEqual(isPathInsideIndex("../etc/passwd", "/var/workspace"), true);
+    assert.strictEqual(
+      isPathInsideIndex("src/index.js", "/var/workspace"),
+      true,
+    );
+    assert.strictEqual(
+      isPathInsideIndex("../etc/passwd", "/var/workspace"),
+      true,
+    );
   });
 
   it("should return true when absolute path is inside directory", () => {
