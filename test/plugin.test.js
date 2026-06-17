@@ -1230,6 +1230,11 @@ describe("FffPlugin", () => {
       assert.strictEqual(filter("node_modules", true), true);
       assert.strictEqual(filter("src", true), false);
     });
+    it("should not throw and return baseline skip filter when readFile throws", async () => {
+      const filter = await loadGitignoreFilter(join(tmpDir, "nonexistent_dir"));
+      assert.strictEqual(filter("node_modules", true), true);
+      assert.strictEqual(filter("src", true), false);
+    });
   });
 
   describe("globWalk internals", () => {
