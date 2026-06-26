@@ -9,6 +9,7 @@ Plugin that replaces the default `grep` and `glob` file search tools with [fff](
 - **Smart mode detection** — Automatically detects regex vs plain patterns; plain mode uses SIMD-accelerated literal matching
 - **Full-text search** — Reads file contents directly for patterns with non-ASCII characters; falls back to async Node.js file reading for exact Unicode matching
 - **Single-file 100% recall** — When `path` points to a file, reads it directly (bypasses fff index)
+- **Monorepo / cross-workspace** — Searches outside the workspace directory (parent dirs, sibling dirs) via filesystem fallback (`fsGrep`/`globWalk`), with a warning log so the agent knows fff was bypassed
 - **Real glob matching** — Recursive `**/`, brace expansion `{a,b}`, character classes via `minimatch`
 - **Exact-name augmentation** — Non-glob patterns (e.g., `temp.ts`) also searched via `globWalk` when fff fuzzy results don't include an exact basename match
 - **Context lines** — Renders `contextBefore`/`contextAfter` with correct line numbers when `context > 0`
@@ -71,7 +72,7 @@ cd opencode-fff-search && npm install
 # Install for MiMo Code
 ./install.sh --target mimocode
 
-# Run the test suite (183 tests)
+# Run the test suite (195 tests)
 node --test 'test/*.test.js'
 
 # Run session simulation tests
@@ -132,6 +133,7 @@ Four search paths, selected automatically:
 | Condition                           | Strategy                                             | Recall |
 | ----------------------------------- | ---------------------------------------------------- | ------ |
 | `path` points to a file             | `directFileGrep` — Node.js async file read           | 100%   |
+| Outside-workspace `path`            | `fsGrep` — directory walk (fff skipped)              | 100%   |
 | Non-ASCII pattern (Turkish/Unicode) | `fsGrep` — directory walk + Unicode regex (`u` flag) | 100%   |
 | ASCII pattern in indexed dir        | fff indexed search (regex/plain + smart case)        | ~90%+  |
 
@@ -198,11 +200,11 @@ fff supports basic regex: character classes (`[abc]`), quantifiers (`+`, `*`, `?
 
 fff's grep indexes symbol tokens (identifiers, component names) but not language keywords (`import`, `const`, `return`, `export`). The plugin cannot override this for ASCII patterns. For keyword search, use bash `grep`/`rg` directly.
 
-#### Workspace-Outside Path Limitation
+#### Cross-Workspace Search (Monorepo)
 
-Both `grep` and `glob` tools only search within the current workspace directory. When `path` points to a directory outside the workspace, the tools throw an error: `Path is outside the workspace directory`. This is by design — fff's index is scoped to a single workspace root. Searching across multiple workspaces or arbitrary system directories is not supported.
+Both `grep` and `glob` support `path` arguments outside the workspace directory. When an outside-workspace path is detected, fff is skipped (its index is workspace-scoped) and the search falls back to `fsGrep` (grep) or `globWalk` (glob) with a warning log. This enables monorepo workflows where OpenCode opens a subdirectory but the agent needs to search the parent root.
 
-**Workaround**: For searching outside the workspace, use bash `grep`/`rg` directly.
+**Note**: Outside-workspace searches use filesystem walk (slower than fff's in-memory index). Results show paths relative to the workspace root (e.g., `../sibling-dir/file.ts`).
 
 #### Grep Recall Gap (Mitigated)
 
@@ -331,7 +333,7 @@ fff's grep may not find matches in all files when searching directories. For 100
 git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search && npm install
 
-# Run the test suite (183 tests)
+# Run the test suite (195 tests)
 node --test 'test/*.test.js'
 
 # Run session simulation tests

@@ -1,16 +1,24 @@
 import { relative, isAbsolute } from "node:path";
 import path from "node:path";
 
-export function resolvePath(directory, p) {
+export function resolvePathUnchecked(directory, p) {
   if (!p) return path.resolve(directory);
-  const resolved = path.resolve(directory, p);
+  return path.resolve(directory, p);
+}
+
+export function isPathOutside(directory, resolvedPath) {
   const dirResolved = path.resolve(directory);
   const prefix = dirResolved.endsWith(path.sep)
     ? dirResolved
     : dirResolved + path.sep;
-  if (resolved !== dirResolved && !resolved.startsWith(prefix)) {
+  return resolvedPath !== dirResolved && !resolvedPath.startsWith(prefix);
+}
+
+export function resolvePath(directory, p) {
+  const resolved = resolvePathUnchecked(directory, p);
+  if (isPathOutside(directory, resolved)) {
     throw new Error(
-      `Path is outside the workspace directory: ${resolved} vs ${dirResolved}`,
+      `Path is outside the workspace directory: ${resolved} vs ${path.resolve(directory)}`,
     );
   }
   return resolved;
@@ -28,8 +36,7 @@ export function isPathInsideIndex(argsPath, directory) {
 }
 
 export function debugLog(message, ...args) {
-  if (process.env.DEBUG_GREP)
-    console.error("[GREP-DEBUG]", message, ...args);
+  if (process.env.DEBUG_GREP) console.error("[GREP-DEBUG]", message, ...args);
 }
 
 export async function safeLog(client, level, message) {
@@ -44,11 +51,7 @@ export async function waitForScan(scanPromise, timeoutMs) {
   debugLog(
     "waitForScan START, scanPromise type:",
     typeof scanPromise,
-    scanPromise === undefined
-      ? "UNDEF"
-      : scanPromise === null
-        ? "NULL"
-        : "obj",
+    scanPromise === undefined ? "UNDEF" : scanPromise === null ? "NULL" : "obj",
   );
   try {
     const resolved = await Promise.race([

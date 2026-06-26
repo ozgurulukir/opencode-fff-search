@@ -13,10 +13,14 @@ const {
   detectGrepMode,
   filterByPath,
   resolvePath,
+  resolvePathUnchecked,
+  isPathOutside,
   getRelativePath,
   isPathInsideIndex,
   parsePatterns,
+  compilePatterns,
   shouldIncludeFile,
+  shouldIncludeCompiled,
   applyMinimatchFilter,
   safeLog,
   waitForScan,
@@ -179,6 +183,78 @@ describe("resolvePath", () => {
 
     assert.strictEqual(resolvePath(workspace, ""), path.resolve(workspace));
     assert.strictEqual(resolvePath(workspace, null), path.resolve(workspace));
+  });
+});
+
+describe("resolvePathUnchecked", () => {
+  it("should resolve inside-workspace paths same as resolvePath", () => {
+    const workspace =
+      process.platform === "win32" ? "C:\\var\\workspace" : "/var/workspace";
+    assert.strictEqual(
+      resolvePathUnchecked(workspace, "src/index.js"),
+      path.resolve(workspace, "src/index.js"),
+    );
+    assert.strictEqual(
+      resolvePathUnchecked(workspace, "./src"),
+      path.resolve(workspace, "src"),
+    );
+  });
+
+  it("should resolve outside-workspace paths WITHOUT throwing", () => {
+    const workspace =
+      process.platform === "win32" ? "C:\\var\\workspace" : "/var/workspace";
+    const outside =
+      process.platform === "win32" ? "C:\\other\\project" : "/other/project";
+
+    assert.strictEqual(resolvePathUnchecked(workspace, outside), outside);
+
+    assert.strictEqual(
+      resolvePathUnchecked(workspace, "../sibling"),
+      path.resolve(workspace, "../sibling"),
+    );
+
+    assert.strictEqual(
+      resolvePathUnchecked(workspace, "../../other"),
+      path.resolve(workspace, "../../other"),
+    );
+  });
+
+  it("should resolve falsy path to directory itself", () => {
+    const workspace = "/var/workspace";
+    assert.strictEqual(
+      resolvePathUnchecked(workspace, ""),
+      path.resolve(workspace),
+    );
+    assert.strictEqual(
+      resolvePathUnchecked(workspace, null),
+      path.resolve(workspace),
+    );
+  });
+});
+
+describe("isPathOutside", () => {
+  it("should return false for paths inside the workspace", () => {
+    const workspace = "/var/workspace";
+    assert.strictEqual(isPathOutside(workspace, "/var/workspace"), false);
+    assert.strictEqual(isPathOutside(workspace, "/var/workspace/src"), false);
+    assert.strictEqual(
+      isPathOutside(workspace, "/var/workspace/deep/nested/file.js"),
+      false,
+    );
+  });
+
+  it("should return true for paths outside the workspace", () => {
+    const workspace = "/var/workspace";
+    assert.strictEqual(isPathOutside(workspace, "/var/other"), true);
+    assert.strictEqual(isPathOutside(workspace, "/other/project"), true);
+    assert.strictEqual(isPathOutside(workspace, "/var"), true);
+  });
+
+  it("should not match partial directory name prefix", () => {
+    assert.strictEqual(
+      isPathOutside("/var/workspace", "/var/workspace-evil"),
+      true,
+    );
   });
 });
 

@@ -36,11 +36,13 @@ The plugin exports an async default function `(input)` (also exported as `server
 
 ```
 grep:
-  File path      → directFileGrep (Node.js fsPromises.readFile) → format
-  Unicode pattern → fsGrep (fsPromises.readdir + fsPromises.readFile + Unicode regex) → post-filter → format
-  ASCII pattern  → fff grep (plain or regex mode) → if zero → plain→regex retry → fsGrep fallback → post-filter → format
+  Outside-workspace path → resolvePathUnchecked → fsGrep (filesystem walk, fff skipped) → format
+  File path (inside)     → directFileGrep (Node.js fsPromises.readFile) → format
+  Unicode pattern        → fsGrep (fsPromises.readdir + fsPromises.readFile + Unicode regex) → post-filter → format
+  ASCII pattern (inside) → fff grep (plain or regex mode) → if zero → plain→regex retry → fsGrep fallback → post-filter → format
 
 glob:
+  Outside-workspace path → resolvePathUnchecked → globWalk directly (fff skipped) → absolute paths → format
   Metachar + type=directory → globWalk directly (fff directorySearch is fuzzy, not glob-aware)
   Metachar + type=file      → fff fileSearch → minimatch post-filter → globWalk fallback → absolute paths → format
   Fuzzy query               → fff fileSearch/directorySearch → filter by path → globWalk fallback → absolute paths → format
@@ -65,15 +67,19 @@ glob:
 - `finder.waitForScan(15000)` — Waits for initial index build (15s timeout)
 - `detectGrepMode(pattern)` — Returns `"regex"` or `"plain"` based on regex metachar detection
 - `finder.grep(pattern, opts)` — Content search with regex/plain mode + smart case + cursor pagination
-- `directFileGrep(filePath, basePath, pattern, ctxLines)` — Direct file read for 100% recall on single-file searches
-- `fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude)` — Directory-level grep for non-ASCII (Unicode/Turkish) patterns; walks dirs with `fsPromises.readdir` and reads files with `fsPromises.readFile` using exact Unicode regex (`u` flag). Bypasses fff's Unicode normalization to avoid `ş↔s` overcount. Applies include/exclude during traversal. Include/exclude patterns are pre-parsed once via `parsePatterns()` before the loop.
-- `globWalk(dir, pattern, basePath, limit, type)` — Real glob matching via recursive `fsPromises.readdir` + minimatch (supports file/directory type)
+- `directFileGrep(filePath, basePath, pattern, ctxLines)` — Direct file read for 100% recall on single-file searches. Uses `resolvePathUnchecked` (allows outside-workspace files).
+- `fsGrep(dir, basePath, pattern, ctxLines, pathFilter, include, exclude, limit)` — Directory-level grep for non-ASCII (Unicode/Turkish) patterns and outside-workspace searches; walks dirs with `fsPromises.readdir` and reads files with `fsPromises.readFile` using exact Unicode regex (`u` flag). Bypasses fff's Unicode normalization to avoid `ş↔s` overcount. Applies include/exclude during traversal. Include/exclude patterns are pre-compiled once via `compilePatterns(parsePatterns(...))` before the loop.
+- `globWalk(dir, pattern, basePath, limit, type)` — Real glob matching via recursive `fsPromises.readdir` + minimatch (supports file/directory type). File matching checks both `relativePath` and `entry.name` so `*.ts` matches nested files when `dir != basePath` (outside-workspace or subdirectory searches).
 - `loadGitignoreFilter(basePath)` — Async function that reads `.gitignore` via `fsPromises.readFile` and augments `SKIP_DIRS` with directory-name entries; cached per basePath. Used by `fsGrep` and `globWalk` (both `await` it).
 - `fetchGrepPages(finder, pattern, opts, limit, abort, client)` — Cursor-based pagination across fff's 50-item pages; page ceiling = `ceil(limit/50) + 2`
 - `filterByPath(items, pathKey, targetPath)` — Post-filter results to a subdirectory or file
-- `filterByGlob(items, pattern)` — Post-filter results by include glob pattern
-- `filterByExclude(items, exclude)` — Post-filter results by exclude glob pattern
+- `compilePatterns(patterns)` — Pre-compiles string patterns into `Minimatch` instances with `{ dot: true }`. Returns `null` for falsy input. Used by `shouldIncludeCompiled` and `applyMinimatchFilter` to avoid re-parsing glob patterns on every item × pattern iteration.
+- `shouldIncludeCompiled(relativePath, fileName, incMm, excMm)` — Core include/exclude filter using pre-compiled `Minimatch[]` instances and `.match()` calls. Extracts `relativePath.split("/")` once before the `.some()` loop (avoids redundant string allocation per exclude pattern).
+- `shouldIncludeFile(relativePath, fileName, includePatterns, excludePatterns)` — Backward-compatible wrapper that compiles string patterns via `compilePatterns()` then delegates to `shouldIncludeCompiled`.
 - `parsePatterns(str)` — Parses comma-separated glob string into array once; returns `null` for empty. Used by `applyMinimatchFilter` and `fsGrep` to avoid repeated splitting in loops.
+- `resolvePathUnchecked(directory, p)` — Resolves a path without enforcing workspace boundaries. Never throws. Used by `performGrepRouting`, `directFileGrep`, and the glob tool for outside-workspace search support.
+- `resolvePath(directory, p)` — Resolves a path and throws if outside the workspace. Built on `resolvePathUnchecked` + `isPathOutside`. Used only where boundary enforcement is needed.
+- `isPathOutside(directory, resolvedPath)` — Returns `true` if `resolvedPath` is outside `directory`. Used to detect outside-workspace searches and route to `fsGrep`/`globWalk` instead of fff.
 - `getRelativePath(directory, argsPath)` — Converts `argsPath` to relative: returns `null` if falsy, `relative(directory, argsPath)` if absolute, otherwise `argsPath` as-is. Replaces 7 duplicated ternaries.
 - `isPathInsideIndex(argsPath, directory)` — Returns `true` if `argsPath` is `null`, relative, or an absolute path inside `directory`. Used to decide whether fff can handle the search or `fsGrep` is needed.
 - `waitForScan(scanPromise, timeoutMs)` — Race between scan completion and timeout, never throws
@@ -367,31 +373,27 @@ This is necessary because regex mode silently drops literal metacharacters: `foo
 
 ### Exclude Parameter Filtering
 
-The `exclude` parameter matches against **both** `relativePath` and `fileName`. This is necessary because `minimatch("dir/Foo.vue", "*.vue")` returns false (`*` doesn't match `/`):
+The `exclude` parameter matches against **both** `relativePath` and `fileName` (and path segments for directory-style excludes). This is necessary because `minimatch("dir/Foo.vue", "*.vue")` returns false (`*` doesn't match `/`):
 
 ```javascript
-if (args.exclude) {
-  const patterns = args.exclude
-    .split(",")
-    .map((p) => p.trim())
-    .filter(Boolean);
-  matches = matches.filter(
-    (m) =>
-      !patterns.some(
-        (pat) =>
-          minimatch(m.relativePath, pat, { dot: true }) ||
-          minimatch(m.fileName, pat, { dot: true }),
-      ),
-  );
-}
+// Patterns are pre-compiled once before the loop (compilePatterns)
+// Inside shouldIncludeCompiled:
+const parts = relativePath.split("/"); // extracted once, not per-pattern
+const excluded = excMm.some(
+  (mm) =>
+    mm.match(fileName) ||
+    mm.match(relativePath) ||
+    parts.some((part) => mm.match(part)),
+);
 ```
 
 ### Glob Tool: Glob vs Fuzzy Routing
 
 The glob tool detects whether the pattern contains glob metacharacters (`*`, `?`, `[`):
 
+- **Outside-workspace paths** — skips fff entirely (index is workspace-scoped) and uses `globWalk` directly. A `safeLog` warning is emitted: `"Searching outside workspace (globWalk): /path"`.
 - **Glob patterns + type=directory** — skips fff's `directorySearch` (which is fuzzy, not glob-aware) and uses `globWalk` directly for proper minimatch matching
-- **Glob patterns + type=file** → fff fuzzy search → minimatch post-filter → `globWalk` fallback
+- **Glob patterns + type=file** → fff fuzzy search → minimatch post-filter (`applyMinimatchFilter`) → `globWalk` fallback
   - `globWalk()` uses recursive `fsPromises.readdir` + `minimatch`
   - Supports recursive `**/`, brace expansion (`*.{ts,js}`), and character classes via `minimatch`
   - Directory matching checks both `relativePath` and `entry.name` so `*` matches nested dirs
@@ -533,13 +535,14 @@ Automated test suite using `node:test` (zero external dependencies, Node.js 18+)
 node --test 'test/*.test.js'
 ```
 
-183 tests across 46 suites split across three files:
+195 tests across 49 suites split across three files:
 
 - **`test/plugin.test.js`** — Plugin integration tests (initialization, tool shape, grep/glob
   execute, case sensitivity, path filtering, exclude/include, Turkish/Unicode, context lines,
   limit, abort, regex mode, pagination, edge cases, fsGrep/globWalk/directFileGrep internals)
 - **`test/internals.test.js`** — Pure unit tests for internal functions (detectGrepMode,
-  filterByPath, resolvePath, getRelativePath, isPathInsideIndex, parsePatterns, shouldIncludeFile,
+  filterByPath, resolvePath, resolvePathUnchecked, isPathOutside, getRelativePath, isPathInsideIndex, parsePatterns,
+  compilePatterns, shouldIncludeFile, shouldIncludeCompiled,
   applyMinimatchFilter, safeLog, waitForScan, searchInFile, fetchGrepPages, lazyFff,
   performGrepRouting)
 - **`test/stress.test.js`** — SIGBUS stability stress tests (file mutation, multiple native
@@ -607,16 +610,15 @@ This bug appeared in **two separate PRs** (#1 and #3), both in the `fsGrep` fall
 
 `fsGrep` walks directories with `fsPromises.readdir` and reads files with `fsPromises.readFile`. For a common short pattern (e.g. `fn`, `pub`, `use`) the bigram content index in fff returns zero results, the `fsGrep` failsafe fires, and it can take a long time scanning every file in a directory.
 
-**Fix**: `fsGrep` now accepts an optional `limit` parameter and returns early when `results.length >= limit`. The two reachable call sites (Unicode fallback and failsafe fallback) pass `limit` through. When calling `fsGrep`, always pass the caller's `limit` so the early-return guard works correctly. (The "outside-index" fallback is not reachable — `resolvePath()` rejects outside-workspace paths before `fsGrep` can be called.)
+**Fix**: `fsGrep` now accepts an optional `limit` parameter and returns early when `results.length >= limit`. The two reachable call sites (Unicode fallback and failsafe fallback) pass `limit` through. When calling `fsGrep`, always pass the caller's `limit` so the early-return guard works correctly.
 
 ### The `fsGrep` failsafe is the last-resort fallback — not first choice
 
 `fsGrep` is intentionally slow (directory-level async I/O). It should only be reached through:
 
+- Outside-workspace paths — `isPathOutside` detects the path is outside the workspace, so fff is skipped entirely
 - Unicode/Non-ASCII patterns (`/[^\x00-\x7F]/`) — forced `fsGrep` route
 - Zero-result failsafe — fff returned nothing, recurse to `fsGrep`
-
-Note: `resolvePath()` rejects paths outside the workspace before `fsGrep` can be called. The "outside-index" fallback is not reachable — attempts to search outside the workspace throw `Path is outside the workspace directory`.
 
 For ASCII patterns where fff returns results, `fsGrep` is never called. The exception is PR #3's fix where the failsafe `fallbackDir` was computed with `join()` instead of `resolvePath()`, causing it to silently find nothing.
 
@@ -624,7 +626,7 @@ For ASCII patterns where fff returns results, `fsGrep` is never called. The exce
 
 When adding a parameter like `limit` to the grep tool, check [upstream source](https://github.com/anomalyco/opencode/blob/main/packages/opencode/src/tool/grep.ts) first to understand the upstream contract and ensure extensions remain aligned.
 
-19. **Path resolution consistency**: `fsGrep` failsafe fallback must use `resolvePath(directory, args.path)`, not `join()`. Same pattern applies to any new `fsGrep` call sites. (Reinforces Gotcha #9 — fff fallback path bug has recurred twice.)
+19. **Path resolution consistency**: `fsGrep` failsafe fallback must use `resolvePathUnchecked(directory, args.path)`, not `join()` or `resolvePath()`. `resolvePath()` throws for outside-workspace paths; `resolvePathUnchecked()` does not. Same pattern applies to any new path resolution in search routing. (Reinforces Gotcha #9 — fff fallback path bug has recurred twice.)
 
 ### Rust binary panic: `grep.rs:2110` slice out-of-bounds in `@ff-labs/fff-node@0.7.0`
 
@@ -726,12 +728,18 @@ loads twice. The npm spec must be removed when using the symlink approach.
 20. **Upstream (OpenCode/Bun) plugin loading bug — `"paths[1]" must be of type string, got object`**: When `package.json` in the plugin directory (e.g. `~/.config/opencode/`) lacks `"type": "module"`, Bun's internal CJS `require()` implementation throws `The "paths[1]" property must be of type string, got object` during dependency resolution. This is a Bun runtime bug — OpenCode's plugin loader (`packages/opencode/src/plugin/loader.ts`) calls `import(row.entry)` with no second argument and no `paths` option. The error originates from Bun's bundled `require.resolve` wrapper which receives an invalid `options.paths` array internally when the module type is ambiguous. **Root cause on Windows**: `@ff-labs/fff-node` depends on `ffi-rs` which uses CJS `require()` to load native `.node` addons — this triggers the Bun `paths[1]` bug on Windows. **Solution**: the plugin now detects Bun at runtime (`typeof Bun !== "undefined"`) and imports `@ff-labs/fff-bun` instead, which uses `bun:ffi` (`dlopen`) and has zero CJS dependencies. Under Node.js (tests), `@ff-labs/fff-node` is used.
 21. **Named exports trigger `getLegacyPlugins()` server calls**: OpenCode's `getLegacyPlugins(mod)` iterates `Object.values(mod)` and invokes each function-valued export as a separate plugin `server()`. Under Bun-on-Windows, calling an internal function like `fsGrep` or `loadGitignoreFilter` with `(PluginInput, options)` arguments triggers a `paths[1]` CJS interop crash inside Bun's `require.resolve`. **Fix**: Always wrap test-only internal exports under a single `export async function __test()` rather than individual named `export { ... }` blocks.
 22. **Auto-discovery glob does not match subdirectories**: OpenCode's auto-discovery uses `{plugin,plugins}/*.{ts,js}` — only direct files in the `plugins/` directory. `plugins/subdir/index.js` is never discovered. Always create a symlink directly in `plugins/`: `ln -sf subdir/index.js plugins/my-plugin.js`. If both a symlink file spec and an npm package spec with the same name exist, dedup preserves both (different keys) and the plugin loads twice.
+23. **Outside-workspace search support**: Both tools support `path` arguments outside the workspace directory. When detected via `isPathOutside`, fff is skipped and the search routes to `fsGrep` (grep) or `globWalk` (glob) with a `safeLog` warning. `performGrepRouting`, `directFileGrep`, and the glob tool all use `resolvePathUnchecked` (never throws). `resolvePath` (which throws) is kept for backward compatibility but is no longer used in any search path.
+24. **Pre-compiled minimatch patterns**: All glob pattern matching uses `compilePatterns()` to pre-compile string patterns into `Minimatch` instances before loops. Inside loops, `.match()` is called instead of `minimatch()`. `shouldIncludeCompiled` is the core function that works with pre-compiled instances; `shouldIncludeFile` is a backward-compatible wrapper. `applyMinimatchFilter` pre-compiles once before its `.filter()` loop.
+25. **globWalk file matching**: `globWalk` checks both `relativePath` and `entry.name` for file matching (same as it already did for directories). This is necessary when `dir != basePath` (outside-workspace or subdirectory searches) — otherwise `*.ts` would fail to match `../outside/config.ts` because `*` doesn't match `/`.
 
-## Future Investigation: Cross-Workspace Search
+## Cross-Workspace Search (Implemented)
 
-Both tools currently reject `path` arguments outside the workspace directory with an error. fff's index is workspace-scoped and `fsGrep`/`globWalk` fallbacks also enforce the boundary. Potential improvements:
+Both tools support `path` arguments outside the workspace directory. When an outside-workspace path is detected (via `isPathOutside`), fff is skipped entirely (its index is workspace-scoped) and the search routes directly to `fsGrep` (grep) or `globWalk` (glob). A `safeLog` warning is emitted so the agent knows fff was bypassed.
 
-- Allow outside-workspace paths by skipping fff and routing directly to `fsGrep`/`globWalk`
+This is essential for monorepo workflows where OpenCode opens a subdirectory (e.g., `packages/opencode`) but the agent needs to search the parent monorepo root.
+
+Potential future improvements:
+
 - Multi-root workspace support (multiple fff indices)
 - User-configurable search scope (whitelist of additional directories)
 

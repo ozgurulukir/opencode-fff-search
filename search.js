@@ -3,7 +3,13 @@ import { statSync, existsSync } from "node:fs";
 import { promises as fsPromises } from "node:fs";
 import { minimatch } from "minimatch";
 import { GREP_TIME_BUDGET_MS } from "./constants.js";
-import { resolvePath, getRelativePath, safeLog, debugLog } from "./helpers.js";
+import {
+  resolvePathUnchecked,
+  isPathOutside,
+  getRelativePath,
+  safeLog,
+  debugLog,
+} from "./helpers.js";
 import {
   parsePatterns,
   compilePatterns,
@@ -62,7 +68,7 @@ export async function searchInFile(
 }
 
 export async function directFileGrep(filePath, basePath, pattern, ctxLines) {
-  filePath = resolvePath(basePath, filePath);
+  filePath = resolvePathUnchecked(basePath, filePath);
   const rel = relative(basePath, filePath);
   const fileName = rel.split("/").pop();
   let content;
@@ -224,7 +230,10 @@ export async function globWalk(dir, pattern, basePath, limit, type) {
       }
       if (!entry.isFile()) continue;
       if (type === "directory") continue;
-      if (minimatch(rel, pattern, { dot: true })) {
+      if (
+        minimatch(rel, pattern, { dot: true }) ||
+        minimatch(entry.name, pattern, { dot: true })
+      ) {
         results.push({ relativePath: rel, fileName: entry.name });
         if (results.length >= limit) return results;
       }
@@ -331,7 +340,14 @@ export async function performGrepRouting(
   let resolvedFilePath = null;
   let hasNonAscii = false;
   if (args.path) {
-    const resolvedPath = resolvePath(directory, args.path);
+    const resolvedPath = resolvePathUnchecked(directory, args.path);
+    if (isPathOutside(directory, resolvedPath)) {
+      await safeLog(
+        client,
+        "warn",
+        `Searching outside workspace (fsGrep): ${resolvedPath}`,
+      );
+    }
     try {
       if (existsSync(resolvedPath) && statSync(resolvedPath).isFile()) {
         resolvedFilePath = resolvedPath;
@@ -354,7 +370,7 @@ export async function performGrepRouting(
   } else {
     hasNonAscii = [...args.pattern].some((c) => c.charCodeAt(0) > 127);
     if (hasNonAscii) {
-      const searchDir = resolvePath(directory, args.path || "");
+      const searchDir = resolvePathUnchecked(directory, args.path || "");
       const pathRel = getRelativePath(directory, args.path);
       matches = await fsGrep(
         searchDir,
@@ -414,7 +430,7 @@ export async function performGrepRouting(
         }
       }
       if (!matches || matches.length === 0) {
-        const fallbackDir = resolvePath(directory, args.path);
+        const fallbackDir = resolvePathUnchecked(directory, args.path);
         if (existsSync(fallbackDir)) {
           const pathRel = getRelativePath(directory, args.path);
           matches = await fsGrep(

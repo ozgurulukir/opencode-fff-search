@@ -15,6 +15,8 @@ import {
 } from "./constants.js";
 import {
   resolvePath,
+  resolvePathUnchecked,
+  isPathOutside,
   getRelativePath,
   isPathInsideIndex,
   safeLog,
@@ -293,13 +295,22 @@ const plugin = async (input) => {
               if (context.abort.aborted) throw new Error("Aborted");
 
               const userLimit = args.limit || DEFAULT_GLOB_LIMIT;
-              const searchDir = resolvePath(directory, args.path);
+              const searchDir = resolvePathUnchecked(directory, args.path);
+              const outsideWorkspace =
+                args.path && isPathOutside(directory, searchDir);
+              if (outsideWorkspace) {
+                await safeLog(
+                  client,
+                  "warn",
+                  `Searching outside workspace (globWalk): ${searchDir}`,
+                );
+              }
               const isMetachar = GLOB_METACHAR_RE.test(args.pattern);
               const pageSize =
                 args.path || isMetachar ? Math.max(userLimit, 1000) : userLimit;
               let items;
               const walkLimit = Math.max(userLimit, 100);
-              if (!finder) {
+              if (!finder || outsideWorkspace) {
                 items = await globWalk(
                   searchDir,
                   args.pattern,
@@ -441,6 +452,8 @@ export async function __test() {
     detectGrepMode,
     filterByPath,
     resolvePath,
+    resolvePathUnchecked,
+    isPathOutside,
     getRelativePath,
     isPathInsideIndex,
     directFileGrep,

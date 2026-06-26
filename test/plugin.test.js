@@ -1290,4 +1290,52 @@ describe("FffPlugin", () => {
       assert.strictEqual(results[0].lineContent, "content with [ symbol");
     });
   });
+
+  describe("outside-workspace search (monorepo)", () => {
+    let outsideDir;
+
+    before(() => {
+      outsideDir = join(dirname(tmpDir), "outside-test-" + Date.now());
+      mkdirSync(outsideDir, { recursive: true });
+      writeFileSync(
+        join(outsideDir, "telemetry.js"),
+        "export const telemetry = true;\n",
+      );
+      writeFileSync(
+        join(outsideDir, "config.ts"),
+        "export const port = 3000;\n",
+      );
+    });
+
+    after(() => {
+      rmSync(outsideDir, { recursive: true, force: true });
+    });
+
+    it("grep should search outside-workspace directory without throwing", async () => {
+      const result = await grepExecute(
+        { pattern: "telemetry", path: outsideDir },
+        ctx,
+      );
+      assert.ok(result.metadata.matches >= 1);
+      assert.ok(result.output.includes("telemetry"));
+    });
+
+    it("grep should search outside-workspace single file without throwing", async () => {
+      const result = await grepExecute(
+        { pattern: "port", path: join(outsideDir, "config.ts") },
+        ctx,
+      );
+      assert.ok(result.metadata.matches >= 1);
+      assert.ok(result.output.includes("3000"));
+    });
+
+    it("glob should find files in outside-workspace directory", async () => {
+      const result = await globExecute(
+        { pattern: "*.ts", path: outsideDir },
+        ctx,
+      );
+      assert.ok(result.metadata.count >= 1);
+      assert.ok(result.output.includes("config.ts"));
+    });
+  });
 });
