@@ -1235,6 +1235,19 @@ describe("FffPlugin", () => {
       assert.strictEqual(filter("node_modules", true), true);
       assert.strictEqual(filter("src", true), false);
     });
+    it("should cache filter per basePath (second call returns same reference)", async () => {
+      const giPath = join(tmpDir, ".gitignore");
+      writeFileSync(giPath, "node_modules/\n*.log\nbuild/\n");
+      const filter1 = await loadGitignoreFilter(tmpDir);
+      const filter2 = await loadGitignoreFilter(tmpDir);
+      assert.strictEqual(
+        filter1,
+        filter2,
+        "Same basePath should return cached filter on second call",
+      );
+      assert.strictEqual(filter1("node_modules", true), true);
+      assert.strictEqual(filter2("node_modules", true), true);
+    });
   });
 
   describe("globWalk internals", () => {

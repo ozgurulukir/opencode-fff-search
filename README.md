@@ -72,7 +72,7 @@ cd opencode-fff-search && npm install
 # Install for MiMo Code
 ./install.sh --target mimocode
 
-# Run the test suite (195 tests)
+# Run the test suite (197 tests)
 node --test 'test/*.test.js'
 
 # Run session simulation tests
@@ -333,7 +333,7 @@ fff's grep may not find matches in all files when searching directories. For 100
 git clone https://github.com/ozgurulukir/opencode-fff-search.git
 cd opencode-fff-search && npm install
 
-# Run the test suite (195 tests)
+# Run the test suite (197 tests)
 node --test 'test/*.test.js'
 
 # Run session simulation tests
