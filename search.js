@@ -6,7 +6,8 @@ import { GREP_TIME_BUDGET_MS } from "./constants.js";
 import { resolvePath, getRelativePath, safeLog, debugLog } from "./helpers.js";
 import {
   parsePatterns,
-  shouldIncludeFile,
+  compilePatterns,
+  shouldIncludeCompiled,
   applyMinimatchFilter,
   filterByPath,
 } from "./filters.js";
@@ -124,8 +125,8 @@ export async function fsGrep(
   if (pattern && pattern.length > 200) pattern = pattern.slice(0, 200);
   const hasUpper = /[A-Z]/.test(pattern);
   const shouldSkip = await loadGitignoreFilter(basePath);
-  const incPats = parsePatterns(include);
-  const excPats = parsePatterns(exclude);
+  const incMm = compilePatterns(parsePatterns(include));
+  const excMm = compilePatterns(parsePatterns(exclude));
   let re;
   try {
     re = new RegExp(pattern, hasUpper ? "gu" : "giu");
@@ -148,7 +149,12 @@ export async function fsGrep(
       debugLog("fsGrep readdirSync error:", current, e.message);
       continue;
     }
-    debugLog("fsGrep dir:", current?.substring(0, 80), "entries:", entries.length);
+    debugLog(
+      "fsGrep dir:",
+      current?.substring(0, 80),
+      "entries:",
+      entries.length,
+    );
     for (const entry of entries) {
       if (entry.isDirectory()) {
         if (!shouldSkip(entry.name, true)) {
@@ -165,7 +171,7 @@ export async function fsGrep(
           .length
       )
         continue;
-      if (!shouldIncludeFile(rel, entry.name, incPats, excPats)) continue;
+      if (!shouldIncludeCompiled(rel, entry.name, incMm, excMm)) continue;
 
       const limitReached = await searchInFile(
         fullPath,
@@ -269,7 +275,12 @@ export async function fetchGrepPages(
       emptyRetry < MAX_EMPTY_RETRIES
     ) {
       emptyRetry++;
-      debugLog("empty (totalFilesSearched=0), retry", emptyRetry, "for:", pattern);
+      debugLog(
+        "empty (totalFilesSearched=0), retry",
+        emptyRetry,
+        "for:",
+        pattern,
+      );
       await new Promise((resolve) => setTimeout(resolve, 100 * emptyRetry));
       continue;
     }
@@ -356,7 +367,10 @@ export async function performGrepRouting(
         limit,
       );
     } else {
-      if (finder && (!isPathInsideIndexFn || isPathInsideIndexFn(args.path, directory))) {
+      if (
+        finder &&
+        (!isPathInsideIndexFn || isPathInsideIndexFn(args.path, directory))
+      ) {
         const mode = detectGrepMode(args.pattern);
         const baseOpts = {
           mode,

@@ -96,6 +96,37 @@ describe("filterByPath", () => {
     const utilsItems = filterByPath(items, "path", "src/utils/helper.js");
     assert.strictEqual(utilsItems.length, 1);
     assert.strictEqual(utilsItems[0].path, "src/utils/helper.js");
+
+    // Test with relativePath key (the key used in production)
+    const relItems = [
+      { relativePath: "src/index.js", fileName: "index.js" },
+      { relativePath: "src/utils/helper.js", fileName: "helper.js" },
+      { relativePath: "docs/readme.md", fileName: "readme.md" },
+    ];
+    const srcRel = filterByPath(relItems, "relativePath", "src");
+    assert.strictEqual(srcRel.length, 2);
+
+    // Test backslash normalization (simulates Windows paths)
+    const mixedItems = [
+      { relativePath: "src/components/App.jsx", fileName: "App.jsx" },
+      { relativePath: "src\\utils/helper.js", fileName: "helper.js" },
+    ];
+    const normalized = filterByPath(mixedItems, "relativePath", "src");
+    assert.strictEqual(normalized.length, 2);
+
+    // Test that partial segment prefix does not match
+    assert.strictEqual(
+      filterByPath(relItems, "relativePath", "src/comp").length,
+      0,
+    );
+
+    // Test with absolute path (starts with slash => returns all)
+    const absResult = filterByPath(
+      [{ relativePath: "src/index.js" }],
+      "relativePath",
+      "/var/workspace/src",
+    );
+    assert.deepEqual(absResult, [{ relativePath: "src/index.js" }]);
   });
 });
 
@@ -119,6 +150,21 @@ describe("resolvePath", () => {
 
     assert.throws(
       () => resolvePath(workspace, "../etc/passwd"),
+      /Path is outside the workspace directory/,
+    );
+
+    assert.throws(
+      () => resolvePath(workspace, "../../etc/passwd"),
+      /Path is outside the workspace directory/,
+    );
+
+    assert.throws(
+      () => resolvePath(workspace, "src/../../etc/passwd"),
+      /Path is outside the workspace directory/,
+    );
+
+    assert.throws(
+      () => resolvePath(workspace, "/etc/passwd"),
       /Path is outside the workspace directory/,
     );
 
@@ -410,6 +456,32 @@ describe("safeLog", () => {
       },
     };
     await assert.doesNotReject(() => safeLog(client, "error", "test"));
+  });
+
+  it("should call console.error when client.app.log fails", async () => {
+    const client = {
+      app: {
+        log: async () => {
+          throw new Error("log broken");
+        },
+      },
+    };
+    const original = console.error;
+    let calls = [];
+    console.error = (...args) => calls.push(args);
+    try {
+      await safeLog(client, "warn", "test message");
+    } finally {
+      console.error = original;
+    }
+    assert.ok(calls.length > 0, "Expected console.error to be called");
+    const lastCall = calls[calls.length - 1];
+    assert.ok(
+      lastCall.some(
+        (arg) => typeof arg === "string" && arg.includes("fff-plugin"),
+      ),
+      `Expected '[fff-plugin]' prefix in console.error output, got: ${JSON.stringify(lastCall)}`,
+    );
   });
 
   it("should not throw when client is null/undefined", async () => {

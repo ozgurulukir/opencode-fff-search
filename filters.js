@@ -1,5 +1,10 @@
-import { minimatch } from "minimatch";
+import { Minimatch } from "minimatch";
 import { ROOT_PATH_RE, TRAILING_SLASH_RE } from "./constants.js";
+
+export function compilePatterns(patterns) {
+  if (!patterns) return null;
+  return patterns.map((p) => new Minimatch(p, { dot: true }));
+}
 
 export function parsePatterns(str) {
   if (!str) return null;
@@ -10,40 +15,46 @@ export function parsePatterns(str) {
   return arr.length > 0 ? arr : null;
 }
 
-export function shouldIncludeFile(
-  relativePath,
-  fileName,
-  includePatterns,
-  excludePatterns,
-) {
-  if (includePatterns) {
-    const matches = includePatterns.some(
-      (pat) =>
-        minimatch(fileName, pat, { dot: true }) ||
-        minimatch(relativePath, pat, { dot: true }),
+export function shouldIncludeCompiled(relativePath, fileName, incMm, excMm) {
+  const parts = relativePath.split("/");
+  if (incMm) {
+    const matches = incMm.some(
+      (mm) => mm.match(fileName) || mm.match(relativePath),
     );
     if (!matches) return false;
   }
-  if (excludePatterns) {
-    const excluded = excludePatterns.some(
-      (pat) =>
-        minimatch(fileName, pat, { dot: true }) ||
-        minimatch(relativePath, pat, { dot: true }) ||
-        relativePath
-          .split("/")
-          .some((part) => minimatch(part, pat, { dot: true })),
+  if (excMm) {
+    const excluded = excMm.some(
+      (mm) =>
+        mm.match(fileName) ||
+        mm.match(relativePath) ||
+        parts.some((part) => mm.match(part)),
     );
     if (excluded) return false;
   }
   return true;
 }
 
+export function shouldIncludeFile(
+  relativePath,
+  fileName,
+  includePatterns,
+  excludePatterns,
+) {
+  return shouldIncludeCompiled(
+    relativePath,
+    fileName,
+    compilePatterns(includePatterns),
+    compilePatterns(excludePatterns),
+  );
+}
+
 export function applyMinimatchFilter(items, include, exclude) {
-  const incPats = parsePatterns(include);
-  const excPats = parsePatterns(exclude);
-  if (!incPats && !excPats) return items;
+  const incMm = compilePatterns(parsePatterns(include));
+  const excMm = compilePatterns(parsePatterns(exclude));
+  if (!incMm && !excMm) return items;
   return items.filter((m) =>
-    shouldIncludeFile(m.relativePath, m.fileName, incPats, excPats),
+    shouldIncludeCompiled(m.relativePath, m.fileName, incMm, excMm),
   );
 }
 

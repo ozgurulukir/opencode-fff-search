@@ -1,5 +1,3 @@
-import { minimatch } from "minimatch";
-
 let tool;
 try {
   ({ tool } = await import("@mimo-ai/plugin"));
@@ -23,7 +21,14 @@ import {
   waitForScan,
   debugLog,
 } from "./helpers.js";
-import { filterByPath } from "./filters.js";
+import {
+  filterByPath,
+  parsePatterns,
+  compilePatterns,
+  shouldIncludeFile,
+  shouldIncludeCompiled,
+  applyMinimatchFilter,
+} from "./filters.js";
 import {
   detectGrepMode,
   directFileGrep,
@@ -31,10 +36,9 @@ import {
   globWalk,
   fetchGrepPages,
   performGrepRouting,
+  searchInFile,
 } from "./search.js";
 import { loadGitignoreFilter } from "./gitignore.js";
-import { parsePatterns, shouldIncludeFile, applyMinimatchFilter } from "./filters.js";
-import { searchInFile } from "./search.js";
 
 let FileFinder = null;
 const instances = new Map();
@@ -186,20 +190,22 @@ const plugin = async (input) => {
               const limit = Math.max(1, userLimit);
               const ctxLines = args.context ?? 0;
 
-              const { matches, regexFallbackError } =
-                await performGrepRouting(
-                  directory,
-                  finder,
-                  client,
-                  args,
-                  ctxLines,
-                  limit,
-                  context,
-                  isPathInsideIndex,
-                );
+              const { matches, regexFallbackError } = await performGrepRouting(
+                directory,
+                finder,
+                client,
+                args,
+                ctxLines,
+                limit,
+                context,
+                isPathInsideIndex,
+              );
 
               if (matches.length === 0) {
-                debugLog("matches.length === 0, returning empty for pattern:", args.pattern);
+                debugLog(
+                  "matches.length === 0, returning empty for pattern:",
+                  args.pattern,
+                );
                 return {
                   title: args.pattern,
                   metadata: { matches: 0, truncated: false },
@@ -347,17 +353,7 @@ const plugin = async (input) => {
               }
 
               if (isMetachar) {
-                const globPatterns = args.pattern
-                  .split(",")
-                  .map((p) => p.trim())
-                  .filter(Boolean);
-                items = items.filter((item) =>
-                  globPatterns.some(
-                    (pat) =>
-                      minimatch(item.relativePath, pat, { dot: true }) ||
-                      minimatch(item.fileName, pat, { dot: true }),
-                  ),
-                );
+                items = applyMinimatchFilter(items, args.pattern, null);
               }
 
               if (args.path) {
@@ -454,7 +450,9 @@ export async function __test() {
     waitForScan,
     debugLog,
     parsePatterns,
+    compilePatterns,
     shouldIncludeFile,
+    shouldIncludeCompiled,
     applyMinimatchFilter,
     searchInFile,
     fetchGrepPages,
