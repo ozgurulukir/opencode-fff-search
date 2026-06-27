@@ -82,6 +82,7 @@ glob:
 - `isPathOutside(directory, resolvedPath)` — Returns `true` if `resolvedPath` is outside `directory`. Used to detect outside-workspace searches and route to `fsGrep`/`globWalk` instead of fff.
 - `getRelativePath(directory, argsPath)` — Converts `argsPath` to relative: returns `null` if falsy, `relative(directory, argsPath)` if absolute, otherwise `argsPath` as-is. Replaces 7 duplicated ternaries.
 - `isPathInsideIndex(argsPath, directory)` — Returns `true` if `argsPath` is `null`, relative, or an absolute path inside `directory`. Used to decide whether fff can handle the search or `fsGrep` is needed.
+- `performGrepRouting(directory, finder, client, args, ctxLines, limit, context, isPathInsideIndexFn)` — Central grep routing logic. Decides whether to use fff grep, `directFileGrep`, or `fsGrep` based on path type (file vs directory), pattern charset (ASCII vs Unicode), and workspace boundaries. Accepts optional `isPathInsideIndexFn` parameter for unit-testability with mock finders. Returns `{ items, regexFallbackError }`.
 - `waitForScan(scanPromise, timeoutMs)` — Race between scan completion and timeout, never throws
 - `safeLog(client, level, message)` — Logging that never throws; logs to `console.error` as fallback when `client.app.log` fails
 - `__test()` — Single function export that returns all internal functions for testing; prevents `getLegacyPlugins()` from calling each named export as a separate plugin server (Bun-on-Windows fix)
@@ -539,18 +540,23 @@ Automated test suite using `node:test` (zero external dependencies, Node.js 18+)
 node --test 'test/*.test.js'
 ```
 
-224 tests across 60 suites split across four files:
+224 tests across 60 suites split across five files:
 
 - **`test/plugin.test.js`** — Plugin integration tests (initialization, tool shape, grep/glob
   execute, case sensitivity, path filtering, exclude/include, Turkish/Unicode, context lines,
-  limit, abort, regex mode, pagination, edge cases, fsGrep/globWalk/directFileGrep internals)
+  limit, abort, regex mode, pagination, edge cases, fsGrep/globWalk/directFileGrep internals,
+  gitignore parser/cache, glob truncation, object-shaped directories)
 - **`test/internals.test.js`** — Pure unit tests for internal functions (detectGrepMode,
   filterByPath, resolvePath, resolvePathUnchecked, isPathOutside, getRelativePath, isPathInsideIndex, parsePatterns,
   compilePatterns, shouldIncludeFile, shouldIncludeCompiled,
   applyMinimatchFilter, safeLog, waitForScan, searchInFile, fetchGrepPages, lazyFff,
-  performGrepRouting)
+  performGrepRouting, debugLog, directFileGrep, fsGrep)
 - **`test/stress.test.js`** — SIGBUS stability stress tests (file mutation, multiple native
   instances, large files, plugin-level stress)
+- **`test/glob-error-paths.test.js`** — Subprocess-isolated tests for glob error paths
+  (directorySearch/fileSearch `!ok` throws, plugin outer catch via sync `waitForScan` throw)
+- **`test/fff-init-fallback.test.js`** — Subprocess-isolated test for `FileFinder.create()` throw
+  → fs-only fallback mode
 
 Shared helpers live in `test/helpers.mjs`.
 
@@ -708,6 +714,29 @@ then creates the symlink `plugins/opencode-fff-search.js` → `opencode-fff-sear
 package name `opencode-fff-search`), so **both** survive dedup and the plugin
 loads twice. The npm spec must be removed when using the symlink approach.
 
+### Testing fff-dependent code: two strategies
+
+The plugin's search functions depend on fff's native `FileFinder`, which cannot be easily
+mocked at runtime. Two strategies cover different test layers:
+
+1. **Mock finder injection** (preferred for unit tests): `performGrepRouting` and
+   `fetchGrepPages` accept `finder` as a parameter (and `performGrepRouting` also takes
+   `isPathInsideIndexFn`). Pass a plain object mimicking the fff finder interface
+   (`{ grep: () => ({ ok, value }), waitForScan: () => Promise }`). No subprocess needed.
+   See `test/internals.test.js` "performGrepRouting" and "fetchGrepPages" test groups.
+
+2. **Subprocess isolation** (for plugin-level error paths): When a test must intercept fff
+   at the `import()` level — e.g., `FileFinder.create()` throws, `fileSearch`/`directorySearch`
+   returns `!ok`, or the plugin's outer catch fires — create a temp directory, install a mock
+   `@ff-labs/fff-node` stub package via `npm install`, copy the plugin's `.js` files in, and run
+   the test logic via `child_process.spawnSync`. See `test/glob-error-paths.test.js` and
+   `test/fff-init-fallback.test.js`.
+
+**Outer catch trigger**: The plugin's outer catch (default export at `index.js`) catches errors
+that escape the inner try/catch around `FileFinder.create()`. It fires when
+`finder.waitForScan()` throws synchronously — this call sits outside the inner try/catch.
+Returns `{ tool: {} }` as a safe fallback.
+
 ## Common Gotchas
 
 1. **Return format**: Must return `{ output, metadata }` objects, not plain strings. TUI reads metadata for match counts.
@@ -777,6 +806,8 @@ opencode-fff-search/
 │   ├── plugin.test.js                  # Plugin integration tests (initialization, grep/glob execute)
 │   ├── internals.test.js               # Pure unit tests for internal functions
 │   ├── stress.test.js                  # SIGBUS stability stress tests
+│   ├── glob-error-paths.test.js        # Glob !ok throws + plugin outer catch (subprocess)
+│   ├── fff-init-fallback.test.js       # FileFinder.create() throw → fs-only fallback (subprocess)
 │   ├── session-edit.js                # Edit+search stress test
 │   ├── session-refactor.js            # Rename during search stress test
 │   ├── session-db.js                  # Session DB stress test
