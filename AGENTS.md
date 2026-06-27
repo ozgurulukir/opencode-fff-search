@@ -51,7 +51,7 @@ glob:
 
 ### Tool Output Format
 
-- **grep tool**: Returns `{ title, output: string, metadata: { matches: number, truncated: boolean } }`
+- **grep tool**: Returns `{ title, output: string, metadata: { matches: number, truncated: boolean, regexFallback: boolean } }`
   - Output format: `relativePath:lineNumber:lineContent` (one line per match)
   - When `context > 0`: renders `contextBefore` lines, match line, `contextAfter` lines with correct line numbers
   - Default limit: 100 matches, configurable 1–5000
@@ -261,7 +261,11 @@ tool({
     // 7. Return { title, output, metadata }
     return {
       title: args.pattern,
-      metadata: { matches: total, truncated },
+      metadata: {
+        matches: total,
+        truncated,
+        regexFallback: !!regexFallbackError,
+      },
       output: output.join("\n"),
     };
   },
@@ -322,7 +326,7 @@ The plugin extends the upstream OpenCode tool contracts:
 // Correct
 return {
   title: args.pattern,
-  metadata: { matches: total, truncated },
+  metadata: { matches: total, truncated, regexFallback: !!regexFallbackError },
   output: output.join("\n"),
 };
 
@@ -535,7 +539,7 @@ Automated test suite using `node:test` (zero external dependencies, Node.js 18+)
 node --test 'test/*.test.js'
 ```
 
-195 tests across 49 suites split across three files:
+224 tests across 60 suites split across four files:
 
 - **`test/plugin.test.js`** — Plugin integration tests (initialization, tool shape, grep/glob
   execute, case sensitivity, path filtering, exclude/include, Turkish/Unicode, context lines,

@@ -133,6 +133,24 @@ describe("FffPlugin", () => {
       });
       assert.ok(result.tool.grep, "Plugin should survive logging failure");
     });
+
+    it("should accept object-shaped directory ({ fsPath })", async () => {
+      const { client } = createMockClient();
+      const result = await FffPlugin({
+        directory: { fsPath: tmpDir },
+        client,
+      });
+      assert.ok(result.tool?.grep, "Should accept { fsPath } directory");
+    });
+
+    it("should accept object-shaped directory ({ path })", async () => {
+      const { client } = createMockClient();
+      const result = await FffPlugin({
+        directory: { path: tmpDir },
+        client,
+      });
+      assert.ok(result.tool?.glob, "Should accept { path } directory");
+    });
   });
 
   describe("tool definition shape (OpenCode SDK contract)", () => {
@@ -864,6 +882,23 @@ describe("FffPlugin", () => {
       );
       assert.equal(typeof result, "object", "Invalid type should not crash");
     });
+
+    it("type=directory with metachar pattern routes to globWalk", async () => {
+      const result = await globExecute(
+        { pattern: "s*", type: "directory" },
+        ctx,
+      );
+      assert.equal(typeof result, "object");
+      const lines = out(result).split("\n").filter(Boolean);
+      if (lines.length > 0) {
+        for (const line of lines) {
+          assert.ok(
+            line.includes("src"),
+            `Expected directory matching s*: ${line}`,
+          );
+        }
+      }
+    });
   });
 
   describe("glob path filtering", () => {
@@ -955,6 +990,16 @@ describe("FffPlugin", () => {
       for (const p of paths) {
         const isAbsolute = p.startsWith("/") || /^[a-zA-Z]:\\/.test(p);
         assert.ok(isAbsolute, `Glob path must be absolute: ${p}`);
+      }
+    });
+
+    it("should include truncation notice when results exceed limit", async () => {
+      const result = await globExecute({ pattern: ".", limit: 1 }, ctx);
+      if (result.metadata.truncated) {
+        assert.ok(
+          out(result).includes("Results are truncated"),
+          `Expected truncation notice, got: ${out(result)}`,
+        );
       }
     });
   });
@@ -1247,6 +1292,64 @@ describe("FffPlugin", () => {
       );
       assert.strictEqual(filter1("node_modules", true), true);
       assert.strictEqual(filter2("node_modules", true), true);
+    });
+
+    it("should skip comment and negation lines in .gitignore", async () => {
+      const dir = join(tmpDir, "gi-comments-" + Date.now());
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, ".gitignore"),
+        "# this is a comment\n!important\nmydir/\n",
+      );
+      try {
+        const filter = await loadGitignoreFilter(dir);
+        assert.strictEqual(
+          filter("mydir", true),
+          true,
+          "mydir should be skipped",
+        );
+        assert.strictEqual(
+          filter("important", true),
+          false,
+          "negation should not add to skip",
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should not add glob patterns with wildcards to dir skip set", async () => {
+      const dir = join(tmpDir, "gi-glob-" + Date.now());
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, ".gitignore"), "*.log\ntemp?\nrealdir/\n");
+      try {
+        const filter = await loadGitignoreFilter(dir);
+        assert.strictEqual(filter("realdir", true), true);
+        assert.strictEqual(
+          filter("temp1", true),
+          false,
+          "temp? should not be in skip set",
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("should not add path patterns with slashes to dir skip set", async () => {
+      const dir = join(tmpDir, "gi-slash-" + Date.now());
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, ".gitignore"), "src/generated/\nbuilddir/\n");
+      try {
+        const filter = await loadGitignoreFilter(dir);
+        assert.strictEqual(filter("builddir", true), true);
+        assert.strictEqual(
+          filter("generated", true),
+          false,
+          "path with / should not match bare dir name",
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 

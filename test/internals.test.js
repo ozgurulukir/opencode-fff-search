@@ -24,7 +24,10 @@ const {
   applyMinimatchFilter,
   safeLog,
   waitForScan,
+  debugLog,
   searchInFile,
+  directFileGrep,
+  fsGrep,
   fetchGrepPages,
   lazyFff,
   performGrepRouting,
@@ -1229,6 +1232,294 @@ describe("performGrepRouting", () => {
         normalized.startsWith("src/"),
         `Expected src/ prefix: ${m.relativePath}`,
       );
+    }
+  });
+});
+
+describe("compilePatterns", () => {
+  it("should return null for falsy input", () => {
+    assert.strictEqual(compilePatterns(null), null);
+    assert.strictEqual(compilePatterns(undefined), null);
+  });
+
+  it("should compile string patterns into Minimatch instances", () => {
+    const result = compilePatterns(["*.js", "*.ts"]);
+    assert.ok(Array.isArray(result));
+    assert.strictEqual(result.length, 2);
+    assert.ok(result[0].match("foo.js"));
+    assert.ok(result[1].match("bar.ts"));
+  });
+});
+
+describe("shouldIncludeCompiled", () => {
+  it("should return true when both incMm and excMm are null", () => {
+    assert.strictEqual(
+      shouldIncludeCompiled("src/foo.js", "foo.js", null, null),
+      true,
+    );
+  });
+
+  it("should return true when include matches fileName", () => {
+    const inc = compilePatterns(["*.js"]);
+    assert.ok(shouldIncludeCompiled("src/foo.js", "foo.js", inc, null));
+  });
+
+  it("should return false when include does not match", () => {
+    const inc = compilePatterns(["*.ts"]);
+    assert.strictEqual(
+      shouldIncludeCompiled("src/foo.js", "foo.js", inc, null),
+      false,
+    );
+  });
+
+  it("should return false when exclude matches path segment", () => {
+    const exc = compilePatterns(["components"]);
+    assert.strictEqual(
+      shouldIncludeCompiled("src/components/App.jsx", "App.jsx", null, exc),
+      false,
+    );
+  });
+});
+
+describe("filterByPath null targetPath", () => {
+  it("should return all items when targetPath is null", () => {
+    const items = [{ path: "a.js" }, { path: "b.js" }];
+    assert.deepEqual(filterByPath(items, "path", null), items);
+  });
+
+  it("should return all items when targetPath is empty string", () => {
+    const items = [{ path: "a.js" }];
+    assert.deepEqual(filterByPath(items, "path", ""), items);
+  });
+});
+
+describe("debugLog", () => {
+  it("should not output when DEBUG_GREP is unset", () => {
+    const saved = process.env.DEBUG_GREP;
+    delete process.env.DEBUG_GREP;
+    const original = console.error;
+    let called = false;
+    console.error = () => {
+      called = true;
+    };
+    try {
+      debugLog("test message");
+      assert.strictEqual(called, false);
+    } finally {
+      console.error = original;
+      if (saved !== undefined) process.env.DEBUG_GREP = saved;
+    }
+  });
+
+  it("should output to console.error when DEBUG_GREP is set", () => {
+    const saved = process.env.DEBUG_GREP;
+    process.env.DEBUG_GREP = "1";
+    const original = console.error;
+    let captured = "";
+    console.error = (...args) => {
+      captured = args.join(" ");
+    };
+    try {
+      debugLog("test debug", "extra");
+      assert.ok(captured.includes("[GREP-DEBUG]"));
+      assert.ok(captured.includes("test debug"));
+    } finally {
+      console.error = original;
+      if (saved !== undefined) process.env.DEBUG_GREP = saved;
+      else delete process.env.DEBUG_GREP;
+    }
+  });
+});
+
+describe("directFileGrep long pattern", () => {
+  it("should slice patterns longer than 200 chars and still match", async () => {
+    const f = join(tmpDir, "long-pattern-test.txt");
+    writeFileSync(f, "a".repeat(250) + "\n");
+    try {
+      const results = await directFileGrep(f, tmpDir, "a".repeat(250), 0);
+      assert.ok(results.length >= 1, "Should find match after slicing");
+    } finally {
+      rmSync(f, { force: true });
+    }
+  });
+});
+
+describe("fsGrep edge cases", () => {
+  it("should slice patterns longer than 200 chars", async () => {
+    const f = join(tmpDir, "fsGrep-long-pattern.txt");
+    writeFileSync(f, "b".repeat(250) + "\n");
+    try {
+      const results = await fsGrep(
+        tmpDir,
+        tmpDir,
+        "b".repeat(250),
+        0,
+        null,
+        null,
+        null,
+        10,
+      );
+      assert.ok(results.length >= 1, "Should find match after slicing");
+    } finally {
+      rmSync(f, { force: true });
+    }
+  });
+
+  it("should fall back to escaped regex when pattern is invalid regex", async () => {
+    const f = join(tmpDir, "fsGrep-invalid-regex.txt");
+    writeFileSync(f, "foo(bar) baz\n");
+    try {
+      const results = await fsGrep(
+        tmpDir,
+        tmpDir,
+        "(",
+        0,
+        null,
+        null,
+        null,
+        10,
+      );
+      assert.ok(
+        results.some((r) => r.lineContent.includes("(")),
+        "Should find literal '(' via escaped fallback",
+      );
+    } finally {
+      rmSync(f, { force: true });
+    }
+  });
+});
+
+describe("fetchGrepPages retry exhaustion", () => {
+  it("should stop retrying after MAX_EMPTY_RETRIES and return empty items", async () => {
+    let callCount = 0;
+    const mockFinder = {
+      grep() {
+        callCount++;
+        return {
+          ok: true,
+          value: { items: [], totalFilesSearched: 0, nextCursor: null },
+        };
+      },
+    };
+    const { items } = await fetchGrepPages(
+      mockFinder,
+      "test",
+      { mode: "plain" },
+      100,
+      null,
+      null,
+    );
+    assert.strictEqual(items.length, 0);
+    assert.strictEqual(callCount, 4, `Expected 4 calls, got ${callCount}`);
+  });
+});
+
+describe("performGrepRouting with mock finder", () => {
+  it("should capture regexFallbackError from finder", async () => {
+    const mockFinder = {
+      grep() {
+        return {
+          ok: true,
+          value: {
+            items: [
+              {
+                relativePath: "mock.js",
+                fileName: "mock.js",
+                lineNumber: 1,
+                lineContent: "match",
+              },
+            ],
+            totalFilesSearched: 1,
+            regexFallbackError: "regex engine limit",
+            nextCursor: null,
+          },
+        };
+      },
+    };
+    const ac = new AbortController();
+    const result = await performGrepRouting(
+      tmpDir,
+      mockFinder,
+      null,
+      { pattern: "testpattern" },
+      0,
+      100,
+      { abort: ac.signal },
+    );
+    assert.ok(result.matches.length >= 1);
+    assert.strictEqual(result.regexFallbackError, "regex engine limit");
+  });
+
+  it("should retry with regex mode when plain mode returns zero", async () => {
+    const modeLog = [];
+    const mockFinder = {
+      grep(pattern, opts) {
+        modeLog.push(opts.mode);
+        if (opts.mode === "plain") {
+          return {
+            ok: true,
+            value: { items: [], totalFilesSearched: 1, nextCursor: null },
+          };
+        }
+        return {
+          ok: true,
+          value: {
+            items: [
+              {
+                relativePath: "retry.js",
+                fileName: "retry.js",
+                lineNumber: 1,
+                lineContent: "found via regex",
+              },
+            ],
+            totalFilesSearched: 1,
+            nextCursor: null,
+          },
+        };
+      },
+    };
+    const ac = new AbortController();
+    const result = await performGrepRouting(
+      tmpDir,
+      mockFinder,
+      null,
+      { pattern: "plainword" },
+      0,
+      100,
+      { abort: ac.signal },
+    );
+    assert.ok(modeLog.includes("plain"));
+    assert.ok(modeLog.includes("regex"));
+    assert.ok(result.matches.length >= 1);
+    assert.ok(result.matches[0].lineContent.includes("found via regex"));
+  });
+
+  it("should skip fff when isPathInsideIndexFn returns false", async () => {
+    let fffCalled = false;
+    const mockFinder = {
+      grep() {
+        fffCalled = true;
+        return { ok: true, value: { items: [] } };
+      },
+    };
+    const f = join(tmpDir, "outside-index-test.txt");
+    writeFileSync(f, "searchable content\n");
+    try {
+      const ac = new AbortController();
+      const result = await performGrepRouting(
+        tmpDir,
+        mockFinder,
+        null,
+        { pattern: "searchable" },
+        0,
+        100,
+        { abort: ac.signal },
+        () => false,
+      );
+      assert.strictEqual(fffCalled, false, "fff should not be called");
+      assert.ok(result.matches.length >= 1, "Should find via fsGrep fallback");
+    } finally {
+      rmSync(f, { force: true });
     }
   });
 });

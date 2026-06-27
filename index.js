@@ -210,7 +210,11 @@ const plugin = async (input) => {
                 );
                 return {
                   title: args.pattern,
-                  metadata: { matches: 0, truncated: false },
+                  metadata: {
+                    matches: 0,
+                    truncated: false,
+                    regexFallback: !!regexFallbackError,
+                  },
                   output: "",
                 };
               }
@@ -239,7 +243,11 @@ const plugin = async (input) => {
               }
               return {
                 title: args.pattern,
-                metadata: { matches: total, truncated },
+                metadata: {
+                  matches: total,
+                  truncated,
+                  regexFallback: !!regexFallbackError,
+                },
                 output: output.join("\n"),
               };
             } catch (err) {
