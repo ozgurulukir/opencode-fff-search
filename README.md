@@ -2,6 +2,16 @@
 
 Plugin that replaces the default `grep` and `glob` file search tools with [fff](https://github.com/dmtrKovalenko/fff)'s ultra-fast, typo-resistant search engine. Supports both **OpenCode** and **MiMo Code**.
 
+> [!WARNING]
+> **Built-in Integration Notice**
+>
+> As of **OpenCode v1.17.0** (released June 10, 2026), the `fff`-backed search engine is natively integrated into OpenCode Core:
+> * *“Core: Faster file search across large projects with the new `fff`-backed search tools. (@dmtrKovalenko)”*
+>
+> * **OpenCode >= v1.17.0:** This plugin is no longer needed. It is highly recommended that you **uninstall/remove** this plugin to prevent any conflicts with the built-in search.
+> * **OpenCode < v1.17.0:** Users on older versions can continue to use this plugin as usual.
+
+
 ## Features
 
 - **Drop-in replacement** — Overrides OpenCode's built-in `grep` and `glob` tools
