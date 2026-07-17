@@ -237,13 +237,21 @@ describe("resolvePathUnchecked", () => {
 
 describe("isPathOutside", () => {
   it("should return false for paths inside the workspace", () => {
-    const workspace = "/var/workspace";
-    assert.strictEqual(isPathOutside(workspace, "/var/workspace"), false);
-    assert.strictEqual(isPathOutside(workspace, "/var/workspace/src"), false);
-    assert.strictEqual(
-      isPathOutside(workspace, "/var/workspace/deep/nested/file.js"),
-      false,
-    );
+    const workspace =
+      process.platform === "win32"
+        ? "C:\\var\\workspace"
+        : "/var/workspace";
+    const insidePath =
+      process.platform === "win32"
+        ? "C:\\var\\workspace\\src"
+        : "/var/workspace/src";
+    const deepPath =
+      process.platform === "win32"
+        ? "C:\\var\\workspace\\deep\\nested\\file.js"
+        : "/var/workspace/deep/nested/file.js";
+    assert.strictEqual(isPathOutside(workspace, workspace), false);
+    assert.strictEqual(isPathOutside(workspace, insidePath), false);
+    assert.strictEqual(isPathOutside(workspace, deepPath), false);
   });
 
   it("should return true for paths outside the workspace", () => {
@@ -280,20 +288,42 @@ describe("getRelativePath", () => {
   });
 
   it("should convert absolute path to relative", () => {
+    const workspace =
+      process.platform === "win32"
+        ? "C:\\var\\workspace"
+        : "/var/workspace";
+    const insidePath =
+      process.platform === "win32"
+        ? "C:\\var\\workspace\\src\\index.js"
+        : "/var/workspace/src/index.js";
+    const trailingSlash =
+      process.platform === "win32"
+        ? "C:\\var\\workspace\\"
+        : "/var/workspace/";
     assert.strictEqual(
-      getRelativePath("/var/workspace", "/var/workspace/src/index.js"),
-      "src/index.js",
+      getRelativePath(workspace, insidePath),
+      process.platform === "win32" ? "src\\index.js" : "src/index.js",
     );
     assert.strictEqual(
-      getRelativePath("/var/workspace", "/var/workspace/"),
+      getRelativePath(workspace, trailingSlash),
       "",
     );
   });
 
   it("should produce relative paths even for outside-workspace absolutes", () => {
+    const workspace =
+      process.platform === "win32"
+        ? "C:\\var\\workspace"
+        : "/var/workspace";
+    const outsidePath =
+      process.platform === "win32"
+        ? "C:\\etc\\passwd"
+        : "/etc/passwd";
     assert.strictEqual(
-      getRelativePath("/var/workspace", "/etc/passwd"),
-      "../../etc/passwd",
+      getRelativePath(workspace, outsidePath),
+      process.platform === "win32"
+        ? "..\\..\\etc\\passwd"
+        : "../../etc/passwd",
     );
   });
 });
