@@ -1,8 +1,16 @@
 # SIGBUS Investigation Report
 
+> Historical investigation. The experiments used earlier plugin configurations and fff versions. The current runtime
+> configuration is in `index.js`; this report does not establish whether the same behavior occurs with the current
+> dependency range. See the [v0.6.4 crash report](CRASH_REPORT_v0.6.4.md) for a later incident and the
+> [search reference](SEARCH.md) for current fallback behavior.
+
 ## Summary
 
-**SIGBUS crashes were caused by fff's mmap file cache mapping indexed files into memory.** When any process (editor, git, build tool) truncated, deleted, or overwrote a file that was mmap'd by fff, the process received an unrecoverable SIGBUS (signal 7). The fix uses `disableMmapCache: true`, `aiMode: false`, `disableContentIndexing: true`, and `disableWatch: true` (watcher disabled due to upstream stack overflow — see [fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)).
+The initial investigation associated SIGBUS crashes with fff's mmap-backed file cache during concurrent file mutation.
+Disabling cache and watcher-related options reduced crashes in the tests recorded here. A later
+[v0.6.4 crash report](CRASH_REPORT_v0.6.4.md) recorded crashes despite those settings, so this document's mitigation
+is not a general fix claim.
 
 ## Root Cause
 
@@ -34,7 +42,8 @@ Any of these operations on an mmap'd file = instant process death.
 
 ### Phase 3: Bug Fixes
 1. **`disableWatch: true`** — Prevents fff's file watcher from triggering re-indexing during mutations (watcher detects file changes and triggers full re-scan, hitting mmap'd files mid-mutation)
-2. **`disableMmapCache: true`** — Disables mmap entirely, using standard `read()` syscalls instead
+2. **`disableMmapCache: true`** — Disables the fff file-content cache used in these tests; it does not prove every
+   native mmap use is disabled.
 
 ### Phase 4: Test Suite (78 → 93+ tests)
 
@@ -68,7 +77,7 @@ Any of these operations on an mmap'd file = instant process death.
 
 | Config | mmap cache | watch | Frecency DB | Result |
 |---|---|---|---|---|
-| v0.3.1 (current) | OFF | ON | OFF (aiMode:false) | **Pass** (all tests) |
+| v0.3.1 (at investigation time) | OFF | ON | OFF (aiMode:false) | **Pass** (all tests) |
 | mmap only | ON | OFF | ON | **SIGBUS** on real repo after ~500 mutations |
 | mmap + watch | ON | ON | ON | **Hangs** (watch triggers re-indexing loop) |
 | Multiple instances | ON | OFF | ON | **SIGBUS** (second FileFinder instance crashes) |
@@ -83,12 +92,11 @@ The SIGBUS is **not** from mutations during search. It occurs because:
 
 Even with `disableWatch: true` (no re-indexing), the **initial scan** already mmaps files. If those files are mutated before or during any search, SIGBUS fires.
 
-### Why disableMmapCache: true is Safe
+### Why disabling the mmap cache appeared safe in these tests
 
-With mmap disabled, fff uses standard `read()` syscalls:
-- File is read fresh on each search — no stale memory mappings
-- File can be truncated/deleted/overwritten between reads without crashing
-- Performance impact is negligible: the in-memory index (file list, metadata) dominates latency, not individual file reads
+In the tested paths, disabling the file-content cache caused fff to read file contents through standard `read()`
+syscalls. Those tests did not establish that all internal mmap use was disabled; the later v0.6.4 report records
+crashes despite these options.
 
 ### File Finder.create() Configuration (v0.3.1)
 
@@ -102,10 +110,12 @@ const initResult = FileFinder.create({
 });
 ```
 
-**Four layers of protection:**
-1. `disableMmapCache: true` — Prevents file content mmap (primary SIGBUS source)
-2. `aiMode: false` — Prevents LMDB frecency database init (LMDB uses mmap internally)
-4. `disableWatch: true` — Temporarily disabled due to upstream stack overflow bug in fff-node
+**Options used in this historical configuration:**
+1. `disableMmapCache: true` — Disables the fff file-content cache used in these tests; it did not disable every
+   native mmap path.
+2. `aiMode: false` — Avoids initializing the LMDB frecency database in this configuration.
+3. `disableContentIndexing: true` — Was intended to disable content indexing in this tested configuration.
+4. `disableWatch: true` — Temporarily disabled due to an upstream stack overflow report in fff-node
    v0.6.4 ([fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)). When the upstream
    fix lands, this can be set back to `false` to re-enable file watching.
 
@@ -157,12 +167,12 @@ faster; the measurement interval limits observed rate.
 - **Concurrent opencode sessions stable** — 6 sessions + 3000 mutations, zero crashes
 - `finder.destroy()` **blocks indefinitely** when watcher is active (native thread join)
 
-**Assessment:** The watcher is production-ready with mmap off. New files appear in both grep and glob
-within 1s on real repos, deleted files are cleaned up within 1s, and concurrent opencode sessions
-remain stable. The `destroy()` blocking is a fff-node bug but irrelevant during normal
-plugin operation.
+**Assessment at the time:** In these runs, the watcher was stable with mmap off. New files appeared
+in both grep and glob within 1s on the tested real repository, deleted files were cleaned up within
+1s, and the tested concurrent opencode sessions remained stable. These measurements are historical
+and do not establish current production behavior.
 
-**Decision:** `disableWatch: true` (watcher disabled) with `disableMmapCache: true` (mmap off). While
+**Decision at the time:** `disableWatch: true` (watcher disabled) with `disableMmapCache: true` (mmap off). While
 testing confirmed the watcher is stable with mmap off, an upstream stack overflow bug in fff-node v0.6.4
 ([fff.nvim#422](https://github.com/dmtrKovalenko/fff.nvim/issues/422)) requires disabling the watcher
 until a fix is released.
@@ -170,7 +180,8 @@ until a fix is released.
 **Note:** A second crash was confirmed with `disableWatch: true`, proving the stack overflow is in
 grep processing itself (`libfff_c.so`), not the watcher thread. The defect is in the native binary
 and cannot be prevented by plugin configuration. See [CRASH_REPORT_v0.6.4.md](./CRASH_REPORT_v0.6.4.md).
-The plugin should not be used in production until the upstream fix lands.
+This finding and its production recommendation applied to the tested fff-node v0.6.4 environment; it is not a
+current-version support statement.
 ### Secondary Source: AI Mode (LMDB Frecency Database)
 
 Even with `disableMmapCache: true`, SIGBUS could still occur if `aiMode: true` was set.
@@ -214,75 +225,20 @@ This is expected behavior:
 - **No performance penalty**: Search latency unchanged — 6ms avg grep, 6.5ms avg glob on 48K files
 - **Concurrent session stability**: 6 concurrent opencode instances + 3000 mutations, zero SIGBUS
 
-## Test Infrastructure
+## Test infrastructure
 
-```
-test/
-├── helpers/
-│   └── stress.js                    # Shared: project structure, finder init, cleanup
-├── index.test.js                    # 85 core unit tests (24 suites)
-├── session-edit.js                  # 200 edit+search cycles
-├── session-refactor.js              # 50 searches + 25 renames
-├── session-db.js                    # 200 session DB rewrites
-├── session-git.js                   # 100 git index rewrites
-├── session-nodemodules.js           # 50 creates + 25 removes
-├── session-heavy.js                 # 500 full agent cycles
-├── session-concurrent.js            # 5 finders + 50 concurrent mutations
-├── integration-opencode.js          # Live opencode + async mutations
-├── integration-worker.js            # Live opencode + worker thread mutations
-├── integration-real-repo.js         # Live opencode + real repo mutations
-├── integration-worker-real.js       # Live opencode + worker thread + real repo
-├── integration-multi-session.js     # 4-6 concurrent opencode instances
-├── integration-multi-session-watch.js # Concurrent sessions + watch ON + mutations
-├── stress-mmap-enabled.js           # mmap cache ON tests (proves the crash)
-├── stress-mmap-single.js           # Single-instance mmap test on real repo
-├── stress-watch-enabled.js         # Watch ON + mmap OFF stability tests
-├── stress-watch-real-repo.js        # Watch ON + mmap OFF on real repo (48K files)
-├── stress-watch-timing.js           # Watcher debounce timing measurement
-├── diagnose-mmap.js                 # Isolated diagnostic: which operation triggers SIGBUS
-├── mutation-worker.cjs              # CJS worker for synthetic mutations
-└── mutation-worker-real.cjs         # CJS worker for real repo mutations
-```
+The file list and counts in the original investigation are historical and no longer match the repository. Current test
+groups and commands are maintained in [Development and installation](DEVELOPMENT.md).
 
-## Running Tests
+## Current test commands
 
-```bash
-# Core unit tests (85 tests, 24 suites)
-node --test test/index.test.js
-
-# Session simulation tests
-node --test test/session-*.js
-
-# Integration tests (requires opencode installed and plugin symlinked)
-node --test test/integration-*.js
-
-# Multi-session test (configurable: NUM_SESSIONS=6)
-NUM_SESSIONS=6 node --test test/integration-multi-session.js
-
-# Multi-session with watch enabled (configurable: NUM_SESSIONS=6)
-NUM_SESSIONS=6 node --test test/integration-multi-session-watch.js
-
-# mmap cache enabled tests (proves the crash — will SIGBUS)
-node --test test/stress-mmap-enabled.js  # NOTE: will crash
-
-# Watch-enabled tests (mmap OFF, watch ON — ~40s)
-node --test test/stress-watch-enabled.js
-
-# Watch-enabled real repo test (requires nodejs/node at /tmp/stress-test-repos/nodejs — ~55s)
-node --test test/stress-watch-real-repo.js
-
-# Watcher timing measurement (~12s)
-node --test test/stress-watch-timing.js
-
-# All tests except mmap-enabled
-node --test test/index.test.js test/session-*.js
-
-# Full suite including integration
-node --test test/*.js
-```
+Use the current test commands in [Development and installation](DEVELOPMENT.md). The old commands referred to test
+files and setups that have since changed.
 
 ## References
 
 - [fff.nvim#294](https://github.com/dmtrKovalenko/fff.nvim/issues/294) — Original mmap-related issue
 - [Linux mmap(2) man page](https://man7.org/linux/man-pages/man2/mmap.2.html) — SIGBUS behavior on truncated files
 - [OpenCode Plugin SDK](https://opencode.ai/docs/plugins) — Plugin development guide
+
+Return to the [documentation index](index.md) or [README](../README.md).

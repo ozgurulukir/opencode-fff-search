@@ -1,5 +1,9 @@
 # Crash Report: fff-node v0.6.4 Native SIGBUS
 
+> Historical report for the `@ff-labs/fff-node` v0.6.4 binary and the environment recorded below. The current package
+> dependency range is declared in `package.json`; this report does not establish whether the same crash affects current
+> versions. See [current search behavior](SEARCH.md) and the [documentation index](index.md).
+
 ## Summary
 
 fff-node v0.6.4's native library (`libfff_c.so`) crashes with SIGBUS during file
@@ -31,7 +35,7 @@ indicating multiple distinct mmap access sites inside the library.
 - **OS**: Debian forky/sid x64, Kernel 7.0.1-x64v3-xanmod1
 - **Node.js**: 25.9.0
 - **OpenCode**: 1.14.28, interactive chat mode (`opencode -c`)
-- **fff-node**: v0.6.4 (latest stable published)
+- **fff-node**: v0.6.4 (version tested in this report)
 - **libfff_c.so**: stripped, no build-id, no debug symbols
 
 ## Plugin Configuration (All Crashes)
@@ -144,18 +148,19 @@ data structures.
 - **Mode**: Interactive `opencode -c` with interleaved file mutations and searches
 - **Duration**: Variable — crashes after 1-3 hours of active use
 
-## Mitigation
+## Mitigation recorded at the time
 
-No software mitigation is possible. All configurable safety options are at maximum.
-The defect is in the native binary (`libfff_c.so`) and requires an upstream fix.
+No plugin-level mitigation was identified for the tested v0.6.4 binary, even with
+the options shown above. This conclusion applies to that version and environment;
+it is not a statement about the current fff release or plugin configuration.
 
 ### Recommended Actions
 
-1. **For users**: Remove the plugin and use OpenCode's built-in ripgrep-based grep
-2. **For upstream**: 
+1. **For users at the time**: Remove the plugin and use the host's built-in search.
+2. **For upstream**:
    - Replace all internal mmap usage with `read()`-based access when `enable_mmap_cache=false`
    - Or provide a `disable_all_mmap: true` flag that gates ALL mmap paths
-3. **For plugin**: Track fff-node releases for a fix; consider a `0.6.5-nightly` test
+3. **For plugin maintainers at the time**: Track fff-node releases for a fix and test a candidate build.
 
 ## Timeline
 
@@ -172,5 +177,7 @@ The defect is in the native binary (`libfff_c.so`) and requires an upstream fix.
 
 - fff.nvim#422 (watcher stack overflow): https://github.com/dmtrKovalenko/fff.nvim/issues/422
 - fff-node v0.6.4: https://www.npmjs.com/package/@ff-labs/fff-node/v/0.6.4
-- SIGBUS_INVESTIGATION.md: Mmap cache crash analysis (file content cache, resolved by `disableMmapCache`)
-- Upstream issue filed for internal mmap: [link if filed]
+- [SIGBUS investigation](SIGBUS_INVESTIGATION.md): Mmap cache crash analysis for earlier plugin versions.
+- Upstream issue filed for internal mmap: TODO: add the issue link if one was filed.
+
+Return to the [documentation index](index.md) or [README](../README.md).
